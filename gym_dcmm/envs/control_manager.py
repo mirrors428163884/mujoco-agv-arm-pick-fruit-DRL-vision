@@ -214,11 +214,29 @@ class ControlManager:
             self.env.Dcmm.target_hand_qpos[:] = self.env.Dcmm.open_hand_qpos[:]
         else:
             # Stage 2: Allow hand control from policy
+            # [Fix 2025-12-19] Use DELTA control for hand, same as arm
+            # This is consistent with the action denormalization in PPO which expects deltas
             action_hand = action_dict["hand"]
-            # Update target hand positions (absolute positions, not delta)
             import configs.env.DcmmCfg as DcmmCfg
             hand_joint_indices = np.where(DcmmCfg.hand_mask == 1)[0]
-            self.env.Dcmm.target_hand_qpos[hand_joint_indices] = action_hand
+            
+            # Apply delta to current target positions
+            self.env.Dcmm.target_hand_qpos[hand_joint_indices] += action_hand
+            
+            # Clip to joint limits
+            # Note on indexing:
+            # - hand_joint_indices: indices into target_hand_qpos (0-15 for 16 hand joints)
+            # - jnt_range_offset: offset to find these joints in MuJoCo's jnt_range array
+            #   MuJoCo joint order: 9 wheel joints + 6 arm joints + 16 hand joints
+            #   So hand joints start at index 15 in jnt_range
+            jnt_range_offset = 15
+            for i, qi in enumerate(hand_joint_indices):
+                jnt_idx = qi + jnt_range_offset  # Index into MuJoCo jnt_range
+                low = self.env.Dcmm.model.jnt_range[jnt_idx, 0]
+                high = self.env.Dcmm.model.jnt_range[jnt_idx, 1]
+                self.env.Dcmm.target_hand_qpos[qi] = np.clip(
+                    self.env.Dcmm.target_hand_qpos[qi], low, high
+                )
 
         # Add Target Action to the Buffer
         self.update_target_ctrl()
@@ -300,25 +318,22 @@ class ControlManager:
             # Whether the object falls
             if not self.env.terminated:
                 if self.env.task == "Catching":
-                    # Ignore plant/leaf collisions for object termination
+                    # [Fix 2025-12-19] Ignore plant/leaf AND floor collisions for object termination
+                    # The fruit is a mocap body, so it shouldn't touch floor normally
+                    # But we should be defensive about this
                     is_plant = np.isin(self.env.contacts['object_contacts'], self.plant_geom_ids + self.leaf_geom_ids)
-                    
-                    # mask_coll was: object_contacts < hand_start_id
-                    # This includes plants (usually).
-                    # We want to terminate if object touches something that is NOT hand AND NOT plant.
-                    
-                    # object_contacts contains IDs of OTHER geoms.
-                    # We want to check if ANY of these IDs are "bad".
-                    # Bad = NOT hand AND NOT plant.
+                    is_floor = np.isin(self.env.contacts['object_contacts'], [self.env.floor_id])
                     
                     # is_hand = object_contacts >= hand_start_id
-                    # is_plant = isin(object_contacts, plant_ids)
-                    # is_bad = ~(is_hand | is_plant)
-                    
                     is_hand = self.env.contacts['object_contacts'] >= self.env.hand_start_id
-                    is_bad = ~(is_hand | is_plant)
                     
-                    self.env.terminated = np.any(is_bad)
+                    # "Bad" = NOT hand AND NOT plant AND NOT floor
+                    is_safe = is_hand | is_plant | is_floor
+                    is_bad = ~is_safe
+                    
+                    # Only terminate if there are actual bad contacts
+                    if len(self.env.contacts['object_contacts']) > 0:
+                        self.env.terminated = np.any(is_bad)
                     
                 elif self.env.task == "Tracking":
                     # For tracking, we also ignore plant collisions?

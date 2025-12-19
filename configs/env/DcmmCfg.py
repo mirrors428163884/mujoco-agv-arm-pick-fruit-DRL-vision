@@ -179,13 +179,14 @@ class curriculum:
     # [New] Success rate threshold for phase switching
     phase_switch_success_threshold = 0.30  # 30% success rate required
 
-    # Stem collision penalty changes (reduced severity)
-    collision_stem_start = -0.5
-    collision_stem_end = -5.0
+    # [Fix 2025-12-19] Much gentler stem collision penalty for early training
+    # Start almost zero, gradually increase
+    collision_stem_start = -0.1
+    collision_stem_end = -2.0
     
-    # Orientation strictness changes (reduced severity)
+    # [Fix 2025-12-19] Gentler orientation strictness
     orient_power_start = 1.0
-    orient_power_end = 2.0
+    orient_power_end = 1.5  # Reduced from 2.0
     
     # Adaptive curriculum parameters
     success_rate_threshold = 0.3

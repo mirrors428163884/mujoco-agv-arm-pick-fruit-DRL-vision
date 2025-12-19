@@ -136,13 +136,10 @@ class RewardManagerStage2:
         """
         Compute total reward based on observations, info, and control.
 
-        Optimized Rewards:
-        - Reaching Reward (EE approaching target)
-        - Base Approach Reward (Vehicle moving closer)
-        - Orientation Reward (Hand facing target)
-        - Touch Reward (Contact with target)
-        - Regularization Penalty
-        - Collision Penalties
+        [Fix 2025-12-19] Simplified reward structure for stable learning:
+        - Primary: Distance-based reaching reward (continuous, dense)
+        - Secondary: Grasp reward when close
+        - Penalties: Reduced magnitude, smoother curves
 
         Args:
             obs: Current observation dict
@@ -152,123 +149,100 @@ class RewardManagerStage2:
         Returns:
             float: Total reward
         """
-        # 1. EE Reaching Reward: Normalized tanh (0.0 to 1.0)
-        # When d=0, reward=1.0; when d is large, reward -> 0.0
-        reward_reaching = 1.0 * (1.0 - np.tanh(2.0 * info["ee_distance"]))
-        
-        # 1b. Distance Shaping Reward (milestone bonuses for approaching)
-        reward_distance_shaping = 0.0
         ee_dist = info["ee_distance"]
+        
+        # 1. EE Reaching Reward: Continuous shaping (0.0 to 2.0)
+        # More gradual than tanh for better gradient signal
+        reward_reaching = 2.0 * np.exp(-2.0 * ee_dist)
+        
+        # 1b. Distance Milestone Bonuses (cumulative, smaller magnitude)
+        reward_distance_shaping = 0.0
         if ee_dist < 0.30:
-            reward_distance_shaping += 1.0
+            reward_distance_shaping += 0.5
         if ee_dist < 0.15:
-            reward_distance_shaping += 2.0
+            reward_distance_shaping += 1.0
         if ee_dist < 0.08:
-            reward_distance_shaping += 3.0
-        if ee_dist < 0.05:  # Stage 1 target distance
-            reward_distance_shaping += 5.0
+            reward_distance_shaping += 1.5
+        if ee_dist < 0.05:
+            reward_distance_shaping += 2.0
 
-        # 2. Base Approach Reward: REMOVED (Base is locked)
-        reward_base_approach = 0.0
-
-        # 3. Orientation Reward: Palm should face target (Stricter 4th power)
+        # 2. Orientation Reward (only when close, gentler curve)
         reward_orientation = 0.0
-        if info["ee_distance"] < 0.5: # Only active when close
-            # Get positions
+        if ee_dist < 0.5:
             ee_pos = self.env.Dcmm.data.body("link6").xpos
             obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos
-            
-            # Direction from hand to target
             ee_to_obj = obj_pos - ee_pos
             ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-6)
-
-            # Get palm forward direction from quaternion
             ee_quat = self.env.Dcmm.data.body("link6").xquat
-            # Palm forward = negative Z-axis of EE frame
             palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
-
-            # Alignment: 1.0 = perfect, 0.0 = perpendicular, -1.0 = backwards
             alignment = np.dot(palm_forward, ee_to_obj_norm)
-            
-            # Stricter alignment reward (Dynamic power)
-            reward_orientation = max(0, alignment) ** self.env.current_orient_power * 2.0
+            # Gentler curve: linear instead of power
+            reward_orientation = max(0, alignment) * 1.0
 
-        # 4. Soft Grasp Reward (Force Feedback) - Relaxed thresholds
+        # 3. Grasp Reward (Force Feedback) - Simplified
         reward_grasp = 0.0
         total_contact_force = np.sum(obs['touch'])
-        force_threshold_low = 0.5   # Reduced from 1.0
-        force_threshold_high = 4.0   # Increased from 2.5
         
-        if total_contact_force > 0.01: # If touching
-            if total_contact_force < force_threshold_low:
-                # Any contact gets base reward + bonus for force
-                reward_grasp = 2.0 + 1.0 * total_contact_force
-            elif force_threshold_low <= total_contact_force <= force_threshold_high:
-                # Perfect range: High dense reward
-                reward_grasp = 5.0
-                # Bonus for wrapping (more fingers touching)
-                fingers_touching = np.count_nonzero(obs['touch'] > 0.1)
-                reward_grasp += fingers_touching * 1.0
-            else: # > force_threshold_high
-                # Too strong: Gentle penalty (reduced from -10 to -3)
-                reward_grasp = max(-3.0, 3.0 - 0.5 * (total_contact_force - force_threshold_high))
+        if total_contact_force > 0.01:
+            # Any contact is good, with diminishing returns
+            fingers_touching = np.count_nonzero(obs['touch'] > 0.05)
+            # Base reward for contact + bonus for fingers
+            reward_grasp = 1.0 + 0.5 * fingers_touching
+            # Bonus for good force range (0.5N - 3.0N)
+            if 0.5 <= total_contact_force <= 3.0:
+                reward_grasp += 2.0
+            elif total_contact_force > 3.0:
+                # Slight penalty for excessive force
+                reward_grasp -= 0.5 * min(total_contact_force - 3.0, 2.0)
         
-        # 4b. Perturbation Test Reward (Grasp Stability Validation)
-        reward_perturbation = self.evaluate_grasp_stability(total_contact_force)
+        # 4. Perturbation Test Reward (disabled during early training)
+        # Threshold defined in DcmmCfg.curriculum.phase1_steps
+        reward_perturbation = 0.0
+        perturbation_enable_step = getattr(DcmmCfg.curriculum, 'phase1_steps', 15e6) / 3  # Enable at 1/3 of Phase 1
+        if self.env.global_step > perturbation_enable_step:
+            reward_perturbation = self.evaluate_grasp_stability(total_contact_force)
         
-        # 5. Impact Velocity Penalty (Exponential) - STRENGTHENED
+        # 5. Impact Velocity Penalty (gentler curve)
         reward_impact = 0.0
-        # Check if any touch sensor is active or general contact
         if total_contact_force > 0.01 or self.env.step_touch:
-             ee_vel_global = self.env.Dcmm.data.body("link6").cvel[3:6]
-             impact_speed = np.linalg.norm(ee_vel_global)
-             
-             # Reduced exponential penalty with lower cap
-             # Speed < 0.3m/s -> penalty ~ 0
-             # Speed = 0.5m/s -> penalty ~ -3.4
-             # Speed >= 1.0m/s -> penalty capped at -10.0 (reduced from -30)
-             raw_impact_penalty = -2.0 * (np.exp(3.0 * max(0, impact_speed - 0.3)) - 1.0)
-             reward_impact = max(-10.0, raw_impact_penalty)  # Reduced cap
+            ee_vel_global = self.env.Dcmm.data.body("link6").cvel[3:6]
+            impact_speed = np.linalg.norm(ee_vel_global)
+            # Linear penalty above threshold, capped
+            if impact_speed > 0.3:
+                reward_impact = -min(2.0 * (impact_speed - 0.3), 3.0)
 
-        # 6. Regularization: Keep control smooth
-        reward_regularization = -self.norm_ctrl(ctrl, ['arm', 'hand']) * 0.01
+        # 6. Regularization (reduced weight)
+        reward_regularization = -self.norm_ctrl(ctrl, ['arm', 'hand']) * 0.005
 
-        # 7. Collision Penalty (reduced severity)
+        # 7. Collision Penalty (only on termination, reduced)
         reward_collision = 0.0
-        # If terminated but NOT success -> Failure
         if self.env.terminated and not info.get('is_success', False):
-             reward_collision = -5.0  # Reduced from -10.0
+            reward_collision = -2.0
 
-        # 8. Plant Collision Penalty: Differentiated
+        # 8. Plant Collision Penalty (much reduced during early training)
         reward_plant_collision = 0.0
-
-        # Stem Collision (Rigid, Avoid! - Dynamic Penalty)
+        # Use curriculum to gradually increase stem penalty
         if self.env.contacts['plant_contacts'].size != 0:
-            reward_plant_collision += self.env.current_w_stem # e.g. -20.0
-
-        # Leaf Collision (Soft, Gentle interaction allowed - Velocity dependent)
+            # Start at -0.5, end at -5.0
+            reward_plant_collision += self.env.current_w_stem
         if self.env.contacts['leaf_contacts'].size != 0:
-            ee_vel = np.linalg.norm(self.env.Dcmm.data.body("link6").cvel[3:6])
-            # Small penalty encouraging slow movement through leaves
-            reward_plant_collision += -0.1 * (1.0 + ee_vel)
+            # Very small leaf penalty
+            reward_plant_collision += -0.05
 
-        # 9. Action Rate Penalty (Smoothness)
-        # Flatten current action dict
+        # 9. Action Rate Penalty (reduced)
         current_action_vec = np.concatenate([ctrl['base'], ctrl['arm'], ctrl['hand']])
-
-        # Initialize prev_action_reward if needed
         if self.prev_action_reward is None:
             self.prev_action_reward = np.zeros_like(current_action_vec)
-
         action_diff = current_action_vec - self.prev_action_reward
-        reward_action_rate = -np.linalg.norm(action_diff) * 0.05
+        reward_action_rate = -np.linalg.norm(action_diff) * 0.02
         self.prev_action_reward = current_action_vec.copy()
         
         # 10. Success Reward
         reward_success = 0.0
         if info.get('is_success', False):
-            reward_success = 50.0 # Large sparse reward
+            reward_success = 20.0  # Reduced from 50 to balance with dense rewards
 
+        # Total reward (more balanced magnitudes)
         rewards = (reward_reaching + reward_distance_shaping + reward_orientation +
                   reward_grasp + reward_perturbation + reward_impact + 
                   reward_regularization + reward_collision +
