@@ -53,6 +53,14 @@ reward_weights = {
     "r_finger_approach": 1.0,
     "r_force_closure": 5.0,
     "r_regularization": 0.05,
+    # [NEW 2025-12-19] Arm-specific reward weights for Stage 1 tracking
+    "r_arm_reaching": 2.0,      # Weight for arm reaching reward (base frame)
+    "r_global_reaching": 0.5,   # Weight for global reaching reward
+    "r_arm_motion": 0.5,        # Weight for arm joint deviation
+    "r_arm_action": 0.2,        # Weight for arm action magnitude
+    "r_base_ctrl_scale": 0.005, # Base control penalty scale
+    "r_arm_ctrl_scale": 0.001,  # Arm control penalty scale (lower to encourage use)
+    "r_action_rate": 0.02,      # Action rate penalty scale
 }
 
 ## Define the camera params for the MujocoRenderer.
