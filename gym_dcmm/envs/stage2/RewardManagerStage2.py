@@ -196,8 +196,10 @@ class RewardManagerStage2:
                 reward_grasp -= 0.5 * min(total_contact_force - 3.0, 2.0)
         
         # 4. Perturbation Test Reward (disabled during early training)
+        # Threshold defined in DcmmCfg.curriculum.phase1_steps
         reward_perturbation = 0.0
-        if self.env.global_step > 5e6:  # Enable after 5M steps
+        perturbation_enable_step = getattr(DcmmCfg.curriculum, 'phase1_steps', 15e6) / 3  # Enable at 1/3 of Phase 1
+        if self.env.global_step > perturbation_enable_step:
             reward_perturbation = self.evaluate_grasp_stability(total_contact_force)
         
         # 5. Impact Velocity Penalty (gentler curve)

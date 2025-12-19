@@ -223,16 +223,17 @@ class ControlManager:
             # Apply delta to current target positions
             self.env.Dcmm.target_hand_qpos[hand_joint_indices] += action_hand
             
-            # Clip to joint limits (using the hand joint range from model)
-            # hand joints start at index 21 in qpos, corresponding to joints 15+6=21 (after 9 wheel + 6 arm joints)
-            # But jnt_range indices are different - need to find correct range
-            # From DcmmVecEnvStage2.py: hand_joint_indices = np.where(DcmmCfg.hand_mask == 1)[0] + 15
-            # So the actual joint indices in the model are hand_joint_indices + 15 (wait, that's already added)
-            # Let's just use a safe range for the hand joints
-            hand_qpos_indices = hand_joint_indices + 15  # Convert from 0-indexed mask to joint indices
+            # Clip to joint limits
+            # Note on indexing:
+            # - hand_joint_indices: indices into target_hand_qpos (0-15 for 16 hand joints)
+            # - jnt_range_offset: offset to find these joints in MuJoCo's jnt_range array
+            #   MuJoCo joint order: 9 wheel joints + 6 arm joints + 16 hand joints
+            #   So hand joints start at index 15 in jnt_range
+            jnt_range_offset = 15
             for i, qi in enumerate(hand_joint_indices):
-                low = self.env.Dcmm.model.jnt_range[hand_qpos_indices[i], 0]
-                high = self.env.Dcmm.model.jnt_range[hand_qpos_indices[i], 1]
+                jnt_idx = qi + jnt_range_offset  # Index into MuJoCo jnt_range
+                low = self.env.Dcmm.model.jnt_range[jnt_idx, 0]
+                high = self.env.Dcmm.model.jnt_range[jnt_idx, 1]
                 self.env.Dcmm.target_hand_qpos[qi] = np.clip(
                     self.env.Dcmm.target_hand_qpos[qi], low, high
                 )

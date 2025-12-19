@@ -73,10 +73,6 @@ class ActorCritic(nn.Module):
         self.depth_pixels = kwargs.pop('depth_pixels', 84*84)
         self.img_size = kwargs.pop('img_size', 84)
         
-        # [Fix 2025-12-19] Store actual action dimension (should be 18: 6 arm + 12 hand)
-        # The actions_num passed might be 20 (including base), we handle that in forward
-        self.actions_num = actions_num
-        
         out_size = self.units[-1]
         
         # Actor MLP (Takes State only)
