@@ -86,6 +86,15 @@ class RewardManagerStage1:
         self.avp_ready_pose = DcmmCfg.avp.ready_pose
         self.avp_state_dim = DcmmCfg.avp.state_dim
         self.avp_img_size = DcmmCfg.avp.img_size
+
+        # Sanity checks to avoid silent AVP mismatch
+        if hasattr(self.env, "img_size"):
+            if tuple(self.env.img_size) != (self.avp_img_size, self.avp_img_size):
+                raise ValueError(
+                    f"AVP depth size mismatch: env img_size={self.env.img_size}, "
+                    f"avp_img_size={self.avp_img_size}. Please align config.train.ppo.img_dim "
+                    f"with DcmmCfg.avp.img_size."
+                )
         
         # Initialize AVP statistics
         self.avp_stats = {
@@ -131,6 +140,13 @@ class RewardManagerStage1:
                 self.running_mean_std.load_state_dict(checkpoint['running_mean_std'])
             else:
                 print(">>> AVP Warning: No running_mean_std in checkpoint")
+
+            # Validate loaded stats dimension
+            if self.running_mean_std.running_mean.numel() != self.avp_state_dim:
+                raise ValueError(
+                    f"AVP checkpoint state_dim mismatch: expected {self.avp_state_dim}, "
+                    f"got {self.running_mean_std.running_mean.numel()}"
+                )
             
             # Freeze model
             self.grasp_critic.eval()
