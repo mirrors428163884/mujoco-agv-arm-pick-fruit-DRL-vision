@@ -73,6 +73,10 @@ class ActorCritic(nn.Module):
         self.depth_pixels = kwargs.pop('depth_pixels', 84*84)
         self.img_size = kwargs.pop('img_size', 84)
         
+        # [Fix 2025-12-19] Store actual action dimension (should be 18: 6 arm + 12 hand)
+        # The actions_num passed might be 20 (including base), we handle that in forward
+        self.actions_num = actions_num
+        
         out_size = self.units[-1]
         
         # Actor MLP (Takes State only)
@@ -101,10 +105,16 @@ class ActorCritic(nn.Module):
         self.mu_t = torch.nn.Linear(out_size, actions_num-12) # Placeholder
         self.mu_c = torch.nn.Linear(out_size, actions_num) # Full action dim (20)
         
+        # [Fix 2025-12-19] Initialize sigma to small negative value for smaller initial exploration
+        # exp(-2.0) ≈ 0.135, which is reasonable initial std for normalized actions
         self.sigma_t = nn.Parameter(
-            torch.zeros(actions_num-12, requires_grad=True, dtype=torch.float32), requires_grad=True)
+            torch.full((actions_num-12,), -2.0, dtype=torch.float32), requires_grad=True)
         self.sigma_c = nn.Parameter(
-            torch.zeros(actions_num, requires_grad=True, dtype=torch.float32), requires_grad=True)
+            torch.full((actions_num,), -2.0, dtype=torch.float32), requires_grad=True)
+        
+        # [Fix 2025-12-19] Bounds for log_sigma to prevent entropy explosion/collapse
+        self.log_sigma_min = -5.0  # exp(-5) ≈ 0.007
+        self.log_sigma_max = 0.0   # exp(0) = 1.0
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv1d):
@@ -115,8 +125,7 @@ class ActorCritic(nn.Module):
             if isinstance(m, nn.Linear):
                 if getattr(m, 'bias', None) is not None:
                     torch.nn.init.zeros_(m.bias)
-        nn.init.constant_(self.sigma_t, 0)
-        nn.init.constant_(self.sigma_c, 0)
+        # Note: sigma is initialized above with -2.0, not 0
         # policy output layer with scale 0.01
         # value output layer with scale 1
         torch.nn.init.orthogonal_(self.mu_t.weight, gain=0.01)
@@ -172,16 +181,21 @@ class ActorCritic(nn.Module):
         combined = torch.cat([state_feat, vis_feat], dim=1)
         value = self.value_head(combined)
 
-        sigma_c = self.sigma_c
-        # Normalize to (-1,1)
+        # [Fix 2025-12-19] Clamp log_sigma to prevent entropy explosion/collapse
+        log_sigma_c = torch.clamp(self.sigma_c, self.log_sigma_min, self.log_sigma_max)
+        
+        # Normalize mu to (-1,1)
         mu_c = torch.tanh(mu_c)
 
         # Note: We are only using the Catching Actor (mu_c) as per instructions.
         # Tracking Actor is ignored/placeholder.
         mu = mu_c 
-        sigma = sigma_c
+        
+        # [Fix 2025-12-19] Return bounded log_sigma (expanded to batch size)
+        # log_sigma shape: (actions_num,) -> expand to (batch, actions_num)
+        log_sigma = log_sigma_c.unsqueeze(0).expand(mu.shape[0], -1)
 
-        return mu, mu * 0 + sigma, value
+        return mu, log_sigma, value
 
     def forward(self, input_dict):
         prev_actions = input_dict.get('prev_actions', None)

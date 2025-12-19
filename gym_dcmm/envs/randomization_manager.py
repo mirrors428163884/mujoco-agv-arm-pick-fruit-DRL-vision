@@ -387,19 +387,24 @@ class RandomizationManager:
         # ========================================
         # 3. Compute Robot Position Based on EE Distance
         # ========================================
-        # Compute target EE-to-fruit distance
+        # [Fix 2025-12-19] Compute target EE-to-fruit distance
+        # Phase 1: Start with slightly larger distances to give agent time to learn
         if use_extreme_distribution:
             # Phase 2: 50% reachable + 50% extreme
             if np.random.random() < 0.5:
-                ee_to_fruit_dist = np.random.uniform(0.05, 0.25)  # Reachable
+                ee_to_fruit_dist = np.random.uniform(0.08, 0.30)  # Reachable
             else:
-                ee_to_fruit_dist = np.random.uniform(0.25, 1.50)  # Extreme
+                ee_to_fruit_dist = np.random.uniform(0.30, 1.50)  # Extreme
         else:
-            # Phase 1: 90% reachable + 10% edge
-            if np.random.random() < 0.9:
-                ee_to_fruit_dist = np.random.uniform(0.05, 0.25)  # Reachable
+            # Phase 1: More gradual curriculum
+            # 70% easy (medium distance), 20% close, 10% edge
+            rand_val = np.random.random()
+            if rand_val < 0.70:
+                ee_to_fruit_dist = np.random.uniform(0.10, 0.25)  # Medium (easier)
+            elif rand_val < 0.90:
+                ee_to_fruit_dist = np.random.uniform(0.05, 0.10)  # Close (harder)
             else:
-                ee_to_fruit_dist = np.random.uniform(0.25, 0.50)  # Edge
+                ee_to_fruit_dist = np.random.uniform(0.25, 0.40)  # Edge
         
         # Approach angle: robot approaches from this direction towards fruit
         approach_angle = np.random.uniform(-np.pi, np.pi)

@@ -38,8 +38,12 @@ ppo:
   freeze_arm: False
   truncate_grads: True
   e_clip: 0.2
+  # [Fix 2025-12-19] Adjusted denorm scales:
+  # - Base: Not used in Stage 2 (locked to 0)
+  # - Arm: 0.025 rad/step delta (about 1.4 deg/step)
+  # - Hand: 0.05 rad/step delta (smaller than arm, finer control)
   action_track_denorm: [1.5, 0.025, 0.01]
-  action_catch_denorm: [1.5, 0.025, 0.15]
+  action_catch_denorm: [0.0, 0.025, 0.05]
   
   # [Modified] Increase horizon length for long-term dependency (obstacle avoidance)
   horizon_length: 512
