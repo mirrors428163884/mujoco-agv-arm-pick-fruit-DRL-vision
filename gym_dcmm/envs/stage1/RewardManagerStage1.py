@@ -222,8 +222,9 @@ class RewardManagerStage1:
         obj_pos_rel = self.env.obs_manager.get_relative_object_pos3d()
         arm_reach_distance = np.linalg.norm(ee_pos_rel - obj_pos_rel)
         
-        # Reward: 2.0 when distance=0, approaches 0 as distance increases
-        reward = 2.0 * (1.0 - np.tanh(3.0 * arm_reach_distance))
+        # Use configured weight (default: 2.0)
+        weight = DcmmCfg.reward_weights.get("r_arm_reaching", 2.0)
+        reward = weight * (1.0 - np.tanh(3.0 * arm_reach_distance))
         return reward, arm_reach_distance
     
     def _compute_global_reaching_reward(self, info):
@@ -234,9 +235,10 @@ class RewardManagerStage1:
             info: Environment info containing ee_distance
             
         Returns:
-            float: Reward value (0.5 when distance=0)
+            float: Reward value
         """
-        return 0.5 * (1.0 - np.tanh(2.0 * info["ee_distance"]))
+        weight = DcmmCfg.reward_weights.get("r_global_reaching", 0.5)
+        return weight * (1.0 - np.tanh(2.0 * info["ee_distance"]))
     
     def _compute_base_approach_reward(self, info):
         """
@@ -262,11 +264,13 @@ class RewardManagerStage1:
         Returns:
             tuple: (reward, joint_deviation)
         """
+        # Arm joint indices: 15-21 in qpos
         current_joints = self.env.Dcmm.data.qpos[15:21]
         initial_joints = DcmmCfg.arm_joints
         joint_deviation = np.linalg.norm(current_joints - initial_joints)
         
-        reward = 0.5 * np.tanh(3.0 * joint_deviation)
+        weight = DcmmCfg.reward_weights.get("r_arm_motion", 0.5)
+        reward = weight * np.tanh(3.0 * joint_deviation)
         return reward, joint_deviation
     
     def _compute_arm_action_reward(self, ctrl):
@@ -282,7 +286,8 @@ class RewardManagerStage1:
             float: Reward proportional to arm action magnitude
         """
         arm_action = ctrl.get('arm', np.zeros(6))
-        return 0.2 * np.linalg.norm(arm_action)
+        weight = DcmmCfg.reward_weights.get("r_arm_action", 0.2)
+        return weight * np.linalg.norm(arm_action)
     
     def _compute_orientation_reward(self, info):
         """
@@ -349,8 +354,11 @@ class RewardManagerStage1:
         Returns:
             float: Negative penalty value
         """
-        base_penalty = -np.linalg.norm(ctrl['base']) * DcmmCfg.reward_weights['r_ctrl']['base'] * 0.005
-        arm_penalty = -np.linalg.norm(ctrl['arm']) * DcmmCfg.reward_weights['r_ctrl']['arm'] * 0.001
+        base_scale = DcmmCfg.reward_weights.get('r_base_ctrl_scale', 0.005)
+        arm_scale = DcmmCfg.reward_weights.get('r_arm_ctrl_scale', 0.001)
+        
+        base_penalty = -np.linalg.norm(ctrl['base']) * DcmmCfg.reward_weights['r_ctrl']['base'] * base_scale
+        arm_penalty = -np.linalg.norm(ctrl['arm']) * DcmmCfg.reward_weights['r_ctrl']['arm'] * arm_scale
         return base_penalty + arm_penalty
     
     def _compute_collision_penalty(self):
@@ -403,7 +411,8 @@ class RewardManagerStage1:
             self.prev_action_reward = np.zeros_like(current_action)
         
         action_diff = current_action - self.prev_action_reward
-        penalty = -np.linalg.norm(action_diff) * 0.02
+        action_rate_scale = DcmmCfg.reward_weights.get('r_action_rate', 0.02)
+        penalty = -np.linalg.norm(action_diff) * action_rate_scale
         
         self.prev_action_reward = current_action.copy()
         return penalty
