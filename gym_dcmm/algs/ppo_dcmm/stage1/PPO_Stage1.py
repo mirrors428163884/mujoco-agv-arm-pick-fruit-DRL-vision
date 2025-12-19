@@ -275,6 +275,12 @@ class PPO_Stage1(object):
                     reward_stats = self.env.env_method("get_reward_stats")[0]
                     if reward_stats:
                         wandb.log(reward_stats, step=self.agent_steps)
+                        # [NEW] Print arm-related diagnostics
+                        print("-"*100)
+                        print(f"{'ARM DIAGNOSTICS':<20}")
+                        print(f"{'Arm Reaching':<20}: {reward_stats.get('rewards/arm_reaching_mean', 0):>8.4f}  |  "
+                              f"{'Arm Motion':<20}: {reward_stats.get('rewards/arm_motion_mean', 0):>8.4f}")
+                        print(f"{'Arm Reach Distance':<20}: {reward_stats.get('distance/arm_reach_distance_mean', 0):>8.4f}m")
                 except:
                     pass  # Reward stats not available
 
