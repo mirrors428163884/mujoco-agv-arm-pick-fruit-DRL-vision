@@ -86,6 +86,15 @@ class RewardManagerStage1:
         self.avp_ready_pose = DcmmCfg.avp.ready_pose
         self.avp_state_dim = DcmmCfg.avp.state_dim
         self.avp_img_size = DcmmCfg.avp.img_size
+
+        # Sanity checks to avoid silent AVP mismatch
+        if hasattr(self.env, "img_size"):
+            if tuple(self.env.img_size) != (self.avp_img_size, self.avp_img_size):
+                raise ValueError(
+                    f"AVP depth size mismatch: env img_size={self.env.img_size}, "
+                    f"avp_img_size={self.avp_img_size}. Please align config.train.ppo.img_dim "
+                    f"with DcmmCfg.avp.img_size."
+                )
         
         # Initialize AVP statistics
         self.avp_stats = {
@@ -104,11 +113,9 @@ class RewardManagerStage1:
         ckpt_path = os.path.join(project_root, self.avp_checkpoint_path)
         
         if not os.path.exists(ckpt_path):
-            print(f">>> AVP Warning: Stage 2 Checkpoint not found at {ckpt_path}")
-            print(">>> AVP will be disabled.")
-            self.grasp_critic = None
-            self.running_mean_std = None
-            return
+            raise FileNotFoundError(
+                f"AVP enabled but Stage 2 Critic checkpoint is missing: {ckpt_path}"
+            )
         
         try:
             # Network configuration (must match Stage 2 training)
@@ -133,6 +140,13 @@ class RewardManagerStage1:
                 self.running_mean_std.load_state_dict(checkpoint['running_mean_std'])
             else:
                 print(">>> AVP Warning: No running_mean_std in checkpoint")
+
+            # Validate loaded stats dimension
+            if self.running_mean_std.running_mean.numel() != self.avp_state_dim:
+                raise ValueError(
+                    f"AVP checkpoint state_dim mismatch: expected {self.avp_state_dim}, "
+                    f"got {self.running_mean_std.running_mean.numel()}"
+                )
             
             # Freeze model
             self.grasp_critic.eval()
@@ -504,8 +518,8 @@ class RewardManagerStage1:
         depth_obs = self.env.render_manager.get_depth_obs(
             width=self.avp_img_size,
             height=self.avp_img_size,
-            add_noise=False,
-            add_holes=False
+            add_noise=True,
+            add_holes=True
         )
         depth_tensor = torch.tensor(
             depth_obs.flatten(), dtype=torch.float32, device=self.device

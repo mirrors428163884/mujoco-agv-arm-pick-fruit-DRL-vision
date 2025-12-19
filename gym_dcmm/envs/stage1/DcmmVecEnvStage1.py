@@ -439,9 +439,9 @@ class DcmmVecEnvStage1(gym.Env):
         current_step = self.global_step
         
         # Simple linear interpolation logic
-        # 0 ~ 6M steps: Difficulty increases from 0.0 to 1.0
-        # > 6M steps: Difficulty locked at 1.0 (Full)
-        max_steps = DcmmCfg.curriculum.stage2_steps
+        # 0 ~ stage1_steps: Difficulty increases from 0.0 to 1.0
+        # > stage1_steps: Difficulty locked at 1.0 (Full)
+        max_steps = DcmmCfg.curriculum.stage1_steps
         difficulty = min(max(current_step / max_steps, 0.0), 1.0)
         
         # Dynamic adjustment of Stem Collision Penalty
@@ -468,7 +468,7 @@ class DcmmVecEnvStage1(gym.Env):
     @property
     def curriculum_difficulty(self):
         """Get current curriculum difficulty (0.0 to 1.0) for AVP lambda decay."""
-        max_steps = DcmmCfg.curriculum.stage2_steps
+        max_steps = DcmmCfg.curriculum.stage1_steps
         return min(max(self.global_step / max_steps, 0.0), 1.0)
     
     def get_avp_stats(self):
@@ -608,4 +608,3 @@ if __name__ == "__main__":
                     viewer = args.viewer, object_eval=False,
                     env_time = 2.5, steps_per_policy=20)
     env.run_test()
-
