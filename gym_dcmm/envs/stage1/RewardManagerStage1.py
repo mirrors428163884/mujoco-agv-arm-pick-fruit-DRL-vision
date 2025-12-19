@@ -104,11 +104,9 @@ class RewardManagerStage1:
         ckpt_path = os.path.join(project_root, self.avp_checkpoint_path)
         
         if not os.path.exists(ckpt_path):
-            print(f">>> AVP Warning: Stage 2 Checkpoint not found at {ckpt_path}")
-            print(">>> AVP will be disabled.")
-            self.grasp_critic = None
-            self.running_mean_std = None
-            return
+            raise FileNotFoundError(
+                f"AVP enabled but Stage 2 Critic checkpoint is missing: {ckpt_path}"
+            )
         
         try:
             # Network configuration (must match Stage 2 training)
@@ -504,8 +502,8 @@ class RewardManagerStage1:
         depth_obs = self.env.render_manager.get_depth_obs(
             width=self.avp_img_size,
             height=self.avp_img_size,
-            add_noise=False,
-            add_holes=False
+            add_noise=True,
+            add_holes=True
         )
         depth_tensor = torch.tensor(
             depth_obs.flatten(), dtype=torch.float32, device=self.device
