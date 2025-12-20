@@ -22,13 +22,19 @@ Reward Components:
 - Plant Collision: Stem and leaf collision penalties
 - Action Rate: Smooth action changes
 - AVP: Asymmetric Value Propagation from Stage 2 Critic (optional)
+
+New Reward Components (2025-12-20 Completeness Analysis):
+- Joint Limit Penalty: Soft constraint when joints approach limits (safety)
+- Base Heading: Reward for base facing toward target
+- Precision: Gaussian reward when EE is within 0.3m of target
+- Contact Persistence: Incremental reward for sustained contact
 """
 
 import numpy as np
 import torch
 import os
 import configs.env.DcmmCfg as DcmmCfg
-from gym_dcmm.utils.quat_utils import quat_rotate_vector
+from gym_dcmm.utils.quat_utils import quat_rotate_vector, quat_to_euler, angle_diff
 
 # AVP Imports (only used when AVP is enabled)
 from gym_dcmm.algs.ppo_dcmm.stage2.ModelsStage2 import ActorCritic as CriticStage2
@@ -194,20 +200,28 @@ class RewardManagerStage1:
         
         # [NEW 2025-12-20] Success bonus for task completion
         r_success = self._compute_success_bonus()
+        
+        # [NEW 2025-12-20] Additional reward components from completeness analysis
+        r_joint_limit = self._compute_joint_limit_penalty()
+        r_base_heading = self._compute_base_heading_reward(info)
+        r_precision = self._compute_precision_reward(info)
+        r_contact_persistence = self._compute_contact_persistence_reward()
 
         # Sum all rewards
         total_reward = (
             r_arm_reaching + r_reaching + r_base_approach +
             r_arm_motion + r_arm_action + r_orientation +
             r_touch + r_regularization + r_collision +
-            r_plant_collision + r_action_rate + r_avp + r_success
+            r_plant_collision + r_action_rate + r_avp + r_success +
+            r_joint_limit + r_base_heading + r_precision + r_contact_persistence
         )
 
         # Update statistics
         self._update_reward_stats(
             r_reaching, r_base_approach, r_orientation, r_touch,
             r_collision, r_plant_collision, r_arm_reaching, r_arm_motion,
-            arm_reach_dist, info
+            arm_reach_dist, info, r_joint_limit, r_base_heading, r_precision,
+            r_contact_persistence
         )
 
         # Debug output
@@ -216,7 +230,8 @@ class RewardManagerStage1:
                 r_reaching, r_arm_reaching, r_arm_motion, r_arm_action,
                 r_base_approach, r_orientation, r_touch, r_impact,
                 r_regularization, r_collision, r_plant_collision,
-                r_action_rate, r_avp, arm_reach_dist, arm_joint_dev, total_reward
+                r_action_rate, r_avp, arm_reach_dist, arm_joint_dev, total_reward,
+                r_joint_limit, r_base_heading, r_precision, r_contact_persistence
             )
 
         return total_reward
@@ -450,6 +465,100 @@ class RewardManagerStage1:
         self.prev_action_reward = current_action.copy()
         return penalty
 
+    def _compute_joint_limit_penalty(self):
+        """
+        Penalize when joints approach limits (soft constraint).
+        
+        Uses 10% margin from joint limits to start applying penalty.
+        This encourages the agent to stay away from joint limits for safety.
+        
+        Returns:
+            float: Negative penalty value when joints are near limits
+        """
+        arm_qpos = self.env.Dcmm.data.qpos[15:21]
+        
+        # Get joint limits from MuJoCo model (indices 9-15 for arm joints)
+        # jnt_range indices 9-15 correspond to qpos indices 15-21
+        lower_limits = self.env.Dcmm.model.jnt_range[9:15, 0]
+        upper_limits = self.env.Dcmm.model.jnt_range[9:15, 1]
+        
+        # 10% edge margin for soft constraint
+        margin = 0.1 * (upper_limits - lower_limits)
+        
+        # Compute violations (positive when in margin zone)
+        lower_violation = np.maximum(0, lower_limits + margin - arm_qpos)
+        upper_violation = np.maximum(0, arm_qpos - (upper_limits - margin))
+        
+        penalty_weight = DcmmCfg.reward_weights.get('r_joint_limit', -2.0)
+        return penalty_weight * (np.sum(lower_violation) + np.sum(upper_violation))
+
+    def _compute_base_heading_reward(self, info):
+        """
+        Reward for base facing toward target.
+        
+        Encourages the robot base to orient toward the target object,
+        which helps with reaching and manipulation.
+        
+        Args:
+            info: Environment info containing distances
+            
+        Returns:
+            float: Reward value (0.5 when perfectly aligned)
+        """
+        base_pos = self.env.Dcmm.data.body("base_link").xpos[:2]
+        obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos[:2]
+        
+        # Target direction
+        to_target = obj_pos - base_pos
+        target_heading = np.arctan2(to_target[1], to_target[0])
+        
+        # Current base heading (yaw from quaternion)
+        base_quat = self.env.Dcmm.data.body("base_link").xquat
+        base_heading = quat_to_euler(base_quat)[2]  # yaw
+        
+        heading_error = np.abs(angle_diff(base_heading, target_heading))
+        
+        weight = DcmmCfg.reward_weights.get('r_base_heading', 0.5)
+        return weight * np.exp(-2.0 * heading_error)
+
+    def _compute_precision_reward(self, info):
+        """
+        Precision reward when very close to target (Catching-inspired).
+        
+        Uses Gaussian decay to provide high reward for very precise positioning.
+        Only active when EE is within 0.3m of target.
+        
+        Args:
+            info: Environment info containing ee_distance
+            
+        Returns:
+            float: Precision reward (up to 10.0 at very close range)
+        """
+        if info["ee_distance"] > 0.3:
+            return 0.0
+        
+        # Gaussian decay: 0.05m -> ~7.8 points, 0.1m -> ~6.1 points
+        weight = DcmmCfg.reward_weights.get('r_precision', 10.0)
+        return weight * np.exp(-50.0 * info["ee_distance"]**2)
+
+    def _compute_contact_persistence_reward(self):
+        """
+        Reward for sustained contact (inspired by Catching's stability reward).
+        
+        Provides incremental reward for maintaining contact over multiple steps.
+        This transitions from binary touch reward to continuous contact reward.
+        
+        Returns:
+            float: Contact persistence reward (0-2.0 based on contact duration)
+        """
+        if not self.env.step_touch:
+            return 0.0
+        
+        # Contact steps capped at 10 for reward calculation
+        contact_steps = min(self.env.contact_count, 10)
+        weight = DcmmCfg.reward_weights.get('r_contact_persistence', 2.0)
+        return weight * (contact_steps / 10.0)
+
     # ========================================
     # AVP (Asymmetric Value Propagation)
     # ========================================
@@ -565,12 +674,19 @@ class RewardManagerStage1:
             'arm_reaching_sum': 0.0,
             'arm_motion_sum': 0.0,
             'arm_reach_distance_sum': 0.0,
+            # [NEW 2025-12-20] Additional reward stats
+            'joint_limit_sum': 0.0,
+            'base_heading_sum': 0.0,
+            'precision_sum': 0.0,
+            'contact_persistence_sum': 0.0,
             'count': 0,
         }
     
     def _update_reward_stats(self, r_reaching, r_base_approach, r_orientation,
                              r_touch, r_collision, r_plant_collision,
-                             r_arm_reaching, r_arm_motion, arm_reach_dist, info):
+                             r_arm_reaching, r_arm_motion, arm_reach_dist, info,
+                             r_joint_limit=0.0, r_base_heading=0.0,
+                             r_precision=0.0, r_contact_persistence=0.0):
         """Update running statistics for logging."""
         self.reward_stats['reaching_sum'] += r_reaching
         self.reward_stats['base_approach_sum'] += r_base_approach
@@ -583,6 +699,11 @@ class RewardManagerStage1:
         self.reward_stats['arm_reaching_sum'] += r_arm_reaching
         self.reward_stats['arm_motion_sum'] += r_arm_motion
         self.reward_stats['arm_reach_distance_sum'] += arm_reach_dist
+        # [NEW 2025-12-20] Additional reward stats
+        self.reward_stats['joint_limit_sum'] += r_joint_limit
+        self.reward_stats['base_heading_sum'] += r_base_heading
+        self.reward_stats['precision_sum'] += r_precision
+        self.reward_stats['contact_persistence_sum'] += r_contact_persistence
         self.reward_stats['count'] += 1
     
     def get_reward_stats_and_reset(self):
@@ -605,6 +726,11 @@ class RewardManagerStage1:
             'rewards/plant_collision_mean': self.reward_stats['plant_collision_sum'] / count,
             'rewards/arm_reaching_mean': self.reward_stats['arm_reaching_sum'] / count,
             'rewards/arm_motion_mean': self.reward_stats['arm_motion_sum'] / count,
+            # [NEW 2025-12-20] Additional reward stats
+            'rewards/joint_limit_mean': self.reward_stats['joint_limit_sum'] / count,
+            'rewards/base_heading_mean': self.reward_stats['base_heading_sum'] / count,
+            'rewards/precision_mean': self.reward_stats['precision_sum'] / count,
+            'rewards/contact_persistence_mean': self.reward_stats['contact_persistence_sum'] / count,
             'distance/ee_distance_mean': self.reward_stats['ee_distance_sum'] / count,
             'distance/base_distance_mean': self.reward_stats['base_distance_sum'] / count,
             'distance/arm_reach_distance_mean': self.reward_stats['arm_reach_distance_sum'] / count,
@@ -648,7 +774,9 @@ class RewardManagerStage1:
                                 r_arm_action, r_base_approach, r_orientation,
                                 r_touch, r_impact, r_regularization, r_collision,
                                 r_plant_collision, r_action_rate, r_avp,
-                                arm_reach_dist, arm_joint_dev, total):
+                                arm_reach_dist, arm_joint_dev, total,
+                                r_joint_limit=0.0, r_base_heading=0.0,
+                                r_precision=0.0, r_contact_persistence=0.0):
         """Print detailed reward breakdown for debugging."""
         print(f"reward_reaching: {r_reaching:.3f}")
         print(f"reward_arm_reaching: {r_arm_reaching:.3f}")
@@ -662,6 +790,11 @@ class RewardManagerStage1:
         print(f"reward_plant_collision: {r_plant_collision:.3f}")
         print(f"reward_action_rate: {r_action_rate:.3f}")
         print(f"reward_avp: {r_avp:.3f}")
+        # [NEW 2025-12-20] Additional reward components
+        print(f"reward_joint_limit: {r_joint_limit:.3f}")
+        print(f"reward_base_heading: {r_base_heading:.3f}")
+        print(f"reward_precision: {r_precision:.3f}")
+        print(f"reward_contact_persistence: {r_contact_persistence:.3f}")
         print(f"arm_reach_distance: {arm_reach_dist:.3f}")
         print(f"arm_joint_deviation: {arm_joint_dev:.3f}")
         print(f"total reward: {total:.3f}\n")
