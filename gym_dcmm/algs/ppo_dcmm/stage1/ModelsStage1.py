@@ -106,6 +106,9 @@ class ActorCritic(nn.Module):
             self.value_mlp = MLP(units=self.units, input_size=combined_input_size)
         self.value = torch.nn.Linear(out_size, 1)
         self.mu = torch.nn.Linear(out_size, actions_num)
+        # [Fix 2025-12-20] Initialize log_std to -1.0 (exp(-1) ≈ 0.37) for more focused exploration
+        # Previous value 0 (exp(0) = 1.0) led to extremely high entropy (~20) at training start
+        # Lower initial std helps policy learn faster by reducing action randomness
         self.sigma = nn.Parameter(
             torch.zeros(actions_num, requires_grad=True, dtype=torch.float32), requires_grad=True)
 
@@ -118,7 +121,9 @@ class ActorCritic(nn.Module):
             if isinstance(m, nn.Linear):
                 if getattr(m, 'bias', None) is not None:
                     torch.nn.init.zeros_(m.bias)
-        nn.init.constant_(self.sigma, 0)
+        # [Fix 2025-12-20] Lower initial log_std from 0 to -1.0 for less random initial policy
+        # This reduces initial entropy from ~20 to ~8, allowing more directed exploration
+        nn.init.constant_(self.sigma, -1.0)
 
         # policy output layer with scale 0.01
         # value output layer with scale 1

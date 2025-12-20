@@ -191,13 +191,16 @@ class RewardManagerStage1:
         r_plant_collision = self._compute_plant_collision_penalty()
         r_action_rate = self._compute_action_rate_penalty(ctrl)
         r_avp = self.compute_avp_reward(obs, info)
+        
+        # [NEW 2025-12-20] Success bonus for task completion
+        r_success = self._compute_success_bonus()
 
         # Sum all rewards
         total_reward = (
             r_arm_reaching + r_reaching + r_base_approach +
             r_arm_motion + r_arm_action + r_orientation +
             r_touch + r_regularization + r_collision +
-            r_plant_collision + r_action_rate + r_avp
+            r_plant_collision + r_action_rate + r_avp + r_success
         )
 
         # Update statistics
@@ -217,6 +220,22 @@ class RewardManagerStage1:
             )
 
         return total_reward
+    
+    def _compute_success_bonus(self):
+        """
+        Compute success bonus when task is successfully completed.
+        
+        [NEW 2025-12-20] Added to make task completion more attractive than
+        accumulating dense rewards through "kamikaze" behavior.
+        
+        Returns:
+            float: Success bonus (r_success) if contact_count >= 10, else 0
+        """
+        # Check if agent has maintained contact for 10+ steps (task success)
+        # contact_count is initialized in env.reset() and updated in env.step()
+        if self.env.contact_count >= 10:
+            return DcmmCfg.reward_weights.get("r_success", 50.0)
+        return 0.0
 
     # ========================================
     # Individual Reward Components
