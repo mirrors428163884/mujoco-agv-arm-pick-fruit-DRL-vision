@@ -71,6 +71,10 @@ reward_weights = {
     # [NEW 2025-12-20] Success bonus for completing the task
     # This makes task completion much more attractive than accumulating dense rewards
     "r_success": 50.0,          # Bonus for successful task completion (10 steps of contact)
+    # [NEW 2025-12-20] Additional reward weights from completeness analysis
+    "r_joint_limit": -2.0,      # Penalty weight for approaching joint limits (safety)
+    "r_base_heading": 0.5,      # Reward for base facing toward target
+    "r_contact_persistence": 2.0,  # Reward for sustained contact (0-2.0)
 }
 
 ## Define the camera params for the MujocoRenderer.
