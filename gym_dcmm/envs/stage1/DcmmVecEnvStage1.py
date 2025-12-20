@@ -535,17 +535,30 @@ class DcmmVecEnvStage1(gym.Env):
                 else:
                     truncated = False
             elif self.task == "Tracking":
-                # Require sustained contact (10 steps) before success
-                if self.step_touch:
+                # [Fix 2025-12-20] Success condition aligned with Stage 2 handoff:
+                # - Palm must touch target (step_touch)
+                # - EE must be within distance_thresh (0.25m) to ensure good starting position for Stage 2
+                # - Contact must be sustained for 10 steps
+                info['is_success'] = False  # Default to failure
+                ee_close_enough = info["ee_distance"] < DcmmCfg.distance_thresh
+                
+                if self.step_touch and ee_close_enough:
                     self.contact_count += 1
                     if self.contact_count >= 10:
                         truncated = True
+                        info['is_success'] = True  # Mark as success for Stage 2 handoff
+                        if self.print_info:
+                            print(f"SUCCESS: Stage 1 Tracking complete! EE distance: {info['ee_distance']:.3f}m")
                     else:
                         truncated = False
                 else:
-                    # Lost contact, reset counter
+                    # Lost contact or moved too far, reset counter
                     self.contact_count = 0
                     truncated = False
+                
+                # Time limit truncation (failure)
+                if info["env_time"] > self.env_time and not truncated:
+                    truncated = True
 
             terminated = self.terminated
             done = terminated or truncated
