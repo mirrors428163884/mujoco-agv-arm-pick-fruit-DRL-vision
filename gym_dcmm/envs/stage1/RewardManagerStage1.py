@@ -477,10 +477,10 @@ class RewardManagerStage1:
         """
         arm_qpos = self.env.Dcmm.data.qpos[15:21]
         
-        # Joint limits from DcmmCfg (xarm6 configuration)
-        # Joint 1-3: full rotation, Joint 4: [1.8, 4.141], Joint 5: [0.0, 2.65], Joint 6: [-2.35, -0.785]
-        lower_limits = np.array([-3.14, -2.0, -3.14, 1.8, 0.0, -2.35])
-        upper_limits = np.array([3.14, 0.0, 3.14, 4.141, 2.65, -0.785])
+        # Get joint limits from MuJoCo model (indices 9-15 for arm joints)
+        # jnt_range indices 9-15 correspond to qpos indices 15-21
+        lower_limits = self.env.Dcmm.model.jnt_range[9:15, 0]
+        upper_limits = self.env.Dcmm.model.jnt_range[9:15, 1]
         
         # 10% edge margin for soft constraint
         margin = 0.1 * (upper_limits - lower_limits)
