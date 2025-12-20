@@ -33,6 +33,10 @@ hand_joints = np.array([
 ])
 
 ## Define the reward weights
+## [Fix 2025-12-20] Rebalanced rewards to prevent "kamikaze" reward hacking:
+## - Increased collision penalty from -10 to -50 to deter crash behavior
+## - Added success bonus (r_success=50) to make task completion more attractive
+## - Reduced dense reward weights to prevent reward accumulation without task completion
 reward_weights = {
     "r_base_pos": 0.0,
     "r_ee_pos": 1.0,
@@ -49,18 +53,24 @@ reward_weights = {
         'arm': 1.0,
         'hand': 0.2,
     },
-    "r_collision": -10.0,
+    # [Fix 2025-12-20] Increased collision penalty to deter "kamikaze" behavior
+    # Previous: -10, which was too weak (47 steps of dense rewards > 10 penalty)
+    "r_collision": -50.0,
     "r_finger_approach": 1.0,
     "r_force_closure": 5.0,
     "r_regularization": 0.05,
     # [NEW 2025-12-19] Arm-specific reward weights for Stage 1 tracking
-    "r_arm_reaching": 2.0,      # Weight for arm reaching reward (base frame)
-    "r_global_reaching": 0.5,   # Weight for global reaching reward
-    "r_arm_motion": 0.5,        # Weight for arm joint deviation
-    "r_arm_action": 0.2,        # Weight for arm action magnitude
+    # [Fix 2025-12-20] Reduced arm_reaching weight from 2.0 to 1.0 to reduce reward hacking
+    "r_arm_reaching": 1.0,      # Weight for arm reaching reward (base frame)
+    "r_global_reaching": 0.3,   # Weight for global reaching reward (reduced from 0.5)
+    "r_arm_motion": 0.3,        # Weight for arm joint deviation (reduced from 0.5)
+    "r_arm_action": 0.1,        # Weight for arm action magnitude (reduced from 0.2)
     "r_base_ctrl_scale": 0.005, # Base control penalty scale
     "r_arm_ctrl_scale": 0.001,  # Arm control penalty scale (lower to encourage use)
     "r_action_rate": 0.02,      # Action rate penalty scale
+    # [NEW 2025-12-20] Success bonus for completing the task
+    # This makes task completion much more attractive than accumulating dense rewards
+    "r_success": 50.0,          # Bonus for successful task completion (10 steps of contact)
 }
 
 ## Define the camera params for the MujocoRenderer.
