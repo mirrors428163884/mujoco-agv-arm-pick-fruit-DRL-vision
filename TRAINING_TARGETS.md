@@ -1,4 +1,4 @@
-# DCMM 项目训练目标与 WandB 监控指南
+ DCMM 项目训练目标与 WandB 监控指南
 
 本文档详细说明了 Stage 1 (Tracking) 和 Stage 2 (Catching) 模型的训练目标、理论满分奖励计算，以及 WandB 中关键参数的解读方法。
 
