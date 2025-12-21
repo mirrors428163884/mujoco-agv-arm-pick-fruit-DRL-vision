@@ -55,7 +55,7 @@ reward_weights = {
     },
     # [Fix 2025-12-20] Increased collision penalty to deter "kamikaze" behavior
     # Previous: -10, which was too weak (47 steps of dense rewards > 10 penalty)
-    "r_collision": -50.0,
+    "r_collision": -10.0,
     "r_finger_approach": 1.0,
     "r_force_closure": 5.0,
     "r_regularization": 0.05,

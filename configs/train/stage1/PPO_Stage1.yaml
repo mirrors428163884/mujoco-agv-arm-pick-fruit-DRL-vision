@@ -14,16 +14,17 @@ ppo:
   normalize_value: True
   value_bootstrap: True
   num_actors: ${resolve_default:8,${...num_envs}}
-  reward_scale_value: 0.1
+  reward_scale_value: 0.01  #修改了！！！！！！！！！！！！！！！！！！！
   clip_value_loss: False
   normalize_advantage: True
   gamma: 0.99
   tau: 0.95
   
   # [Modified] Lower learning rate for stability
-  learning_rate: 3e-4 
-  lr_schedule: kl
-  kl_threshold: 0.016
+  lr_schedule: linear  # 改为线性衰减，或者先用 "fixed" (固定)！！！！！！！！！！！！！！
+  learning_rate: 3e-4  # 保持这个初始值！！！！！！！！！！！！！！！！！！
+  #lr_schedule: kl
+  #kl_threshold: 0.016
   
   save_best_after: 500
   save_frequency: 2000
@@ -48,8 +49,8 @@ ppo:
   horizon_length: 1024
   
   # Ensure (num_actors * horizon_length) / minibatch_size is integer
-  minibatch_size: 512
-  mini_epochs: 6
+  minibatch_size: 1024
+  mini_epochs: 5
   
   critic_coef: 4
   clip_value: True
