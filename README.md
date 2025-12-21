@@ -1,6 +1,6 @@
 # Picking_Sorting: 基于AVP的两阶段农业采摘强化学习项目
 
-[![Python 3.8](https://img.shields.io/badge/python-3.8-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/)
 [![MuJoCo](https://img.shields.io/badge/MuJoCo-3.2.3+-green.svg)](https://mujoco.org/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.4.1-red.svg)](https://pytorch.org/)
 
@@ -32,9 +32,9 @@
 
 ### 环境要求
 
-- Python 3.8
-- CUDA 11.8+ (推荐)
-- GPU: NVIDIA RTX 3080 或更高 (推荐)
+- Python 3.11（云端部署建议 3.11.x）
+- NVIDIA 驱动支持 CUDA 12.1+（建议 535+），按 GPU/驱动选择匹配的 PyTorch CUDA 版本
+- GPU: 云端 A10/A100/4090 级别或更高（推荐，至少具备 CUDA 加速能力）
 - 内存: 16GB+ RAM
 
 ### 安装步骤
@@ -45,13 +45,14 @@ git clone https://github.com/hwzhanng/Picking_Sorting.git
 cd Picking_Sorting
 
 # 2. 创建conda环境
-conda create -n picking python=3.8
+conda create -n picking python=3.11
 conda activate picking
 
-# 3. 安装PyTorch (根据CUDA版本选择)
-pip install torch==2.4.1 torchvision==0.20.0 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu118
+# 3. 安装PyTorch (根据GPU/驱动选择CUDA版本)
+#   按需替换 cu121 / cu124，更多组合见 https://pytorch.org/get-started/locally/
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# 4. 安装项目依赖
+# 4. 安装项目依赖（版本未钉死，可随CUDA/驱动灵活选择）
 pip install -r requirements.txt
 
 # 5. 安装项目包
