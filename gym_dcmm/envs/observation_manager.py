@@ -6,6 +6,7 @@ Handles all observation collection and processing.
 import numpy as np
 from gym_dcmm.utils.quat_utils import quat_rotate_vector
 import cv2 as cv
+import configs.env.DcmmCfg as DcmmCfg
 
 
 import mujoco
@@ -21,6 +22,10 @@ class ObservationManager:
             env: Reference to the parent DcmmVecEnv instance
         """
         self.env = env
+        
+        # Object position noise state (for frame drop simulation)
+        self._prev_obj_pos = None
+        self._consecutive_drop_counter = 0  # Remaining consecutive frames to drop
 
     def get_base_vel(self):
         """Get the velocity of the mobile base in base frame (2D)."""
@@ -80,6 +85,85 @@ class ObservationManager:
         obj_rel_base = quat_rotate_vector(base_quat_inv, obj_rel_world)
 
         return obj_rel_base
+    
+    def get_relative_object_pos3d_with_noise(self):
+        """
+        Get object position relative to base in base frame with domain randomization noise.
+        
+        Applies:
+        1. Gaussian noise: Simulates sensor random measurement errors
+        2. Frame drop: Simulates YOLO detection failures (returns 0 or previous value)
+        3. Consecutive frame drop: Simulates prolonged detection loss
+        
+        Returns:
+            tuple: (noisy_obj_pos, is_valid) where:
+                - noisy_obj_pos: Noisy object position in base frame (3D, np.float32)
+                - is_valid: 1.0 if observation is valid, 0.0 if dropped (np.float32)
+        """
+        # Get true object position
+        true_obj_pos = self.get_relative_object_pos3d()
+        
+        # Check if noise is enabled
+        if not DcmmCfg.obj_pos_noise.enabled:
+            return true_obj_pos.astype(np.float32), np.float32(1.0)
+        
+        # Initialize previous position if not set
+        if self._prev_obj_pos is None:
+            self._prev_obj_pos = true_obj_pos.copy()
+        
+        noisy_obj_pos = true_obj_pos.copy()
+        is_valid = np.float32(1.0)  # Default: valid observation
+        
+        # Check for consecutive drop sequence
+        if self._consecutive_drop_counter > 0:
+            # Still in consecutive drop mode
+            self._consecutive_drop_counter -= 1
+            is_valid = np.float32(0.0)  # Mark as invalid
+            if DcmmCfg.obj_pos_noise.drop_use_zero:
+                noisy_obj_pos = np.zeros(3, dtype=np.float32)
+            else:
+                noisy_obj_pos = self._prev_obj_pos.copy()
+            return noisy_obj_pos.astype(np.float32), is_valid
+        
+        # Check for frame drop
+        frame_dropped = False
+        
+        # Start consecutive drop sequence with small probability
+        if DcmmCfg.obj_pos_noise.consecutive_drop_enabled:
+            if np.random.random() < DcmmCfg.obj_pos_noise.consecutive_drop_prob:
+                drop_len_range = DcmmCfg.obj_pos_noise.consecutive_drop_length
+                # Subtract 1 because this frame is already being dropped
+                self._consecutive_drop_counter = np.random.randint(
+                    drop_len_range[0], drop_len_range[1] + 1) - 1
+                frame_dropped = True
+        
+        # Single frame drop
+        if not frame_dropped and DcmmCfg.obj_pos_noise.frame_drop_enabled:
+            if np.random.random() < DcmmCfg.obj_pos_noise.drop_probability:
+                frame_dropped = True
+        
+        if frame_dropped:
+            is_valid = np.float32(0.0)  # Mark as invalid
+            if DcmmCfg.obj_pos_noise.drop_use_zero:
+                noisy_obj_pos = np.zeros(3, dtype=np.float32)
+            else:
+                noisy_obj_pos = self._prev_obj_pos.copy()
+        else:
+            # Apply Gaussian noise to valid observations
+            if DcmmCfg.obj_pos_noise.gaussian_enabled:
+                gaussian_noise = np.random.normal(
+                    0, DcmmCfg.obj_pos_noise.gaussian_std, size=3)
+                noisy_obj_pos = true_obj_pos + gaussian_noise
+            
+            # Update previous position with true (noisy but detected) position
+            self._prev_obj_pos = noisy_obj_pos.copy()
+        
+        return noisy_obj_pos.astype(np.float32), is_valid
+    
+    def reset_noise_state(self):
+        """Reset noise state variables. Call this on environment reset."""
+        self._prev_obj_pos = None
+        self._consecutive_drop_counter = 0
 
     def get_relative_object_v_lin_3d(self):
         """Get object linear velocity in base frame."""
@@ -99,6 +183,9 @@ class ObservationManager:
         Returns:
             dict: Observation dictionary with base, arm, object, and depth info
         """
+        # Get noisy object position and validity flag
+        obj_pos, obj_valid = self.get_relative_object_pos3d_with_noise()
+        
         obs = {
             "base": {
                 "v_lin_2d": self.get_base_vel().astype(np.float32),
@@ -110,9 +197,13 @@ class ObservationManager:
                 "joint_pos": self.env.Dcmm.data.qpos[15:21].astype(np.float32),
             },
             "object": {
-                "pos3d": self.get_relative_object_pos3d().astype(np.float32),
+                "pos3d": obj_pos,
             },
         }
+        
+        # Add validity flag if configured (helps network distinguish dropped vs valid observations)
+        if DcmmCfg.obj_pos_noise.enabled and DcmmCfg.obj_pos_noise.add_validity_flag:
+            obs["object"]["is_valid"] = obj_valid
 
         # Add depth image if render mode is set
         # Use RenderManager.get_depth_obs() for consistent noise processing across stages
@@ -136,6 +227,8 @@ class ObservationManager:
             print(f"ee_v_lin_3d: {obs['arm']['ee_v_lin_3d']}")
             print(f"joint_pos: {obs['arm']['joint_pos']}")
             print(f"object_pos3d: {obs['object']['pos3d']}")
+            if 'is_valid' in obs['object']:
+                print(f"object_is_valid: {obs['object']['is_valid']}")
             print(f"depth shape: {obs['depth'].shape}\n")
 
         return obs

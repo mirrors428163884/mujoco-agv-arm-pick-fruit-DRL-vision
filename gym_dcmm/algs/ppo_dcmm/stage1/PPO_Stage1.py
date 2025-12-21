@@ -12,6 +12,7 @@ import numpy as np
 from gym_dcmm.algs.ppo_dcmm.experience import ExperienceBuffer
 from gym_dcmm.algs.ppo_dcmm.stage1.ModelsStage1 import ActorCritic
 from gym_dcmm.algs.ppo_dcmm.utils import AverageScalarMeter, RunningMeanStd
+import configs.env.DcmmCfg as DcmmCfg
 
 from tensorboardX import SummaryWriter
 
@@ -47,6 +48,12 @@ class PPO_Stage1(object):
         
         self.full_action_dim = self.env.get_attr("act_c_dim")[0]
         self.task = self.env.get_attr("task")[0]
+        
+        # GRU configuration
+        self.use_gru = DcmmCfg.gru_config.enabled
+        self.gru_hidden_size = DcmmCfg.gru_config.hidden_size
+        self.gru_num_layers = DcmmCfg.gru_config.num_layers
+        
         # ---- Model ----
         net_config = {
             'actor_units': self.network_config.mlp.units,
@@ -54,10 +61,19 @@ class PPO_Stage1(object):
             'input_shape': self.obs_shape,
             'separate_value_mlp': self.network_config.get('separate_value_mlp', True),
             'use_vision': full_config.get('use_vision', True),
+            'use_gru': self.use_gru,
+            'gru_hidden_size': self.gru_hidden_size,
+            'gru_num_layers': self.gru_num_layers,
         }
         print("net_config: ", net_config)
         self.model = ActorCritic(net_config)
         self.model.to(self.device)
+        
+        # Initialize hidden state for all environments
+        if self.use_gru:
+            self.hidden_state = self.model.get_initial_hidden(self.num_actors, self.device)
+        else:
+            self.hidden_state = None
         
         # RunningMeanStd only for vector part
         self.running_mean_std = RunningMeanStd((vector_dim,)).to(self.device)
@@ -124,10 +140,17 @@ class PPO_Stage1(object):
 
         self.obs = None
         self.epoch_num = 0
+        
+        # GRU sequence length for truncated BPTT
+        self.gru_seq_len = 32  # Chunk horizon into sequences of this length
+        
         # print("self.obs_shape[0]: ", type(self.obs_shape[0]))
         self.storage = ExperienceBuffer(
             self.num_actors, self.horizon_length, self.batch_size, self.minibatch_size,
             self.obs_shape, self.actions_num, self.device,
+            use_gru=self.use_gru, gru_hidden_size=self.gru_hidden_size, 
+            gru_num_layers=self.gru_num_layers,
+            seq_len=self.gru_seq_len,
         )
 
         batch_size = self.num_actors
@@ -187,6 +210,10 @@ class PPO_Stage1(object):
         reset_obs, _ = self.env.reset()
         self.obs = {'obs': self.obs2tensor(reset_obs)}
         self.agent_steps = self.batch_size
+        
+        # Initialize hidden states for GRU
+        if self.use_gru:
+            self.hidden_state = self.model.get_initial_hidden(self.num_actors, self.device)
 
         while self.agent_steps < self.max_agent_steps:
             self.epoch_num += 1
@@ -343,14 +370,42 @@ class PPO_Stage1(object):
         self.set_train()
         a_losses, b_losses, c_losses = [], [], []
         entropies, kls = [], []
+        # Define expected tuple lengths for storage data
+        STORAGE_DATA_LEN_WITHOUT_HIDDEN = 8
+        STORAGE_DATA_LEN_WITH_HIDDEN = 9
+        
         for mini_ep in range(0, self.mini_epochs_num):
             ep_kls = []
             for i in range(len(self.storage)):
-                value_preds, old_action_log_probs, advantage, old_mu, old_sigma, \
-                    returns, actions, obs = self.storage[i]
+                # Get data from storage (with or without hidden states)
+                storage_data = self.storage[i]
+                if self.use_gru and len(storage_data) == STORAGE_DATA_LEN_WITH_HIDDEN:
+                    value_preds, old_action_log_probs, advantage, old_mu, old_sigma, \
+                        returns, actions, obs, hidden_states = storage_data
+                    # For sequence-based training:
+                    # hidden_states shape: (batch, seq_len, num_layers, hidden_size)
+                    # We only need the hidden state at the start of each sequence
+                    # Take hidden state at t=0: (batch, num_layers, hidden_size)
+                    hidden_states = hidden_states[:, 0, :, :]
+                    # Transpose to (num_layers, batch, hidden_size) for GRU
+                    hidden_states = hidden_states.transpose(0, 1).contiguous()
+                else:
+                    value_preds, old_action_log_probs, advantage, old_mu, old_sigma, \
+                        returns, actions, obs = storage_data[:STORAGE_DATA_LEN_WITHOUT_HIDDEN]
+                    hidden_states = None
 
                 # obs is a dict {'vector': ..., 'image': ...}
-                vector_obs = self.running_mean_std(obs['vector'])
+                # For GRU: obs['vector'] shape is (batch, seq_len, features)
+                # For MLP: obs['vector'] shape is (batch, features)
+                if self.use_gru and obs['vector'].dim() == 3:
+                    # Normalize each timestep in the sequence
+                    batch_size, seq_len = obs['vector'].shape[0], obs['vector'].shape[1]
+                    vector_flat = obs['vector'].reshape(batch_size * seq_len, -1)
+                    vector_normalized = self.running_mean_std(vector_flat)
+                    vector_obs = vector_normalized.reshape(batch_size, seq_len, -1)
+                else:
+                    vector_obs = self.running_mean_std(obs['vector'])
+                
                 processed_obs = {
                     'vector': vector_obs,
                     'image': obs['image']
@@ -360,7 +415,7 @@ class PPO_Stage1(object):
                     'prev_actions': actions,
                     'obs': processed_obs,
                 }
-                res_dict = self.model(batch_dict)
+                res_dict = self.model(batch_dict, hidden_states)
                 action_log_probs = res_dict['prev_neglogp']
                 values = res_dict['values']
                 entropy = res_dict['entropy']
@@ -386,7 +441,7 @@ class PPO_Stage1(object):
                     soft_bound = 1.1
                     mu_loss_high = torch.clamp_min(mu - soft_bound, 0.0) ** 2
                     mu_loss_low = torch.clamp_max(mu + soft_bound, 0.0) ** 2
-                    b_loss = (mu_loss_low + mu_loss_high).sum(axis=-1)
+                    b_loss = (mu_loss_low + mu_loss_high).sum(dim=-1)
                 else:
                     b_loss = 0
                 a_loss, c_loss, entropy, b_loss = [
@@ -403,7 +458,12 @@ class PPO_Stage1(object):
                 self.optimizer.step()
 
                 with torch.no_grad():
-                    kl_dist = policy_kl(mu.detach(), sigma.detach(), old_mu, old_sigma)
+                    # Flatten mu/sigma for KL computation if needed
+                    mu_flat = mu.reshape(-1, mu.shape[-1]) if mu.dim() == 3 else mu
+                    sigma_flat = sigma.reshape(-1, sigma.shape[-1]) if sigma.dim() == 3 else sigma
+                    old_mu_flat = old_mu.reshape(-1, old_mu.shape[-1]) if old_mu.dim() == 3 else old_mu
+                    old_sigma_flat = old_sigma.reshape(-1, old_sigma.shape[-1]) if old_sigma.dim() == 3 else old_sigma
+                    kl_dist = policy_kl(mu_flat.detach(), sigma_flat.detach(), old_mu_flat, old_sigma_flat)
 
                 kl = kl_dist
                 a_losses.append(a_loss)
@@ -440,12 +500,24 @@ class PPO_Stage1(object):
                         obs["hand"],
                         ), axis=1)
         else:
-            obs_array = np.concatenate((
-                    obs["base"]["v_lin_2d"], 
-                    obs["arm"]["ee_pos3d"], obs["arm"]["ee_quat"], obs["arm"]["ee_v_lin_3d"],
-                    obs["object"]["pos3d"],  # Removed v_lin_3d (static object)
-                    # obs["hand"],# TODO: TEST
-                    ), axis=1)
+            # Build list of observation components
+            obs_components = [
+                obs["base"]["v_lin_2d"], 
+                obs["arm"]["ee_pos3d"], obs["arm"]["ee_quat"], obs["arm"]["ee_v_lin_3d"],
+                obs["object"]["pos3d"],
+            ]
+            # Add validity flag if present (helps network distinguish dropped vs valid observations)
+            if "is_valid" in obs["object"]:
+                # is_valid is a scalar, need to expand to match batch dimension
+                is_valid = obs["object"]["is_valid"]
+                if np.isscalar(is_valid) or is_valid.ndim == 0:
+                    # Single env case
+                    is_valid = np.array([[is_valid]], dtype=np.float32)
+                elif is_valid.ndim == 1:
+                    # Multiple envs: (N,) -> (N, 1)
+                    is_valid = is_valid[:, np.newaxis]
+                obs_components.append(is_valid)
+            obs_array = np.concatenate(obs_components, axis=1)
         
         vector_tensor = torch.tensor(obs_array, dtype=torch.float32).to(self.device)
         
@@ -498,11 +570,18 @@ class PPO_Stage1(object):
             'obs': processed_obs,
         }
         if not inference:
-            res_dict = self.model.act(input_dict)
+            res_dict = self.model.act(input_dict, self.hidden_state)
             res_dict['values'] = self.value_mean_std(res_dict['values'], True)
+            # Update hidden state for next step
+            if self.use_gru and 'hidden_states' in res_dict:
+                self.hidden_state = res_dict['hidden_states']
         else:
             res_dict = {}
-            res_dict['actions'] = self.model.act_inference(input_dict)
+            action, new_hidden = self.model.act_inference(input_dict, self.hidden_state)
+            res_dict['actions'] = action
+            # Update hidden state for next step
+            if self.use_gru and new_hidden is not None:
+                self.hidden_state = new_hidden
         return res_dict
 
     def play_steps(self):
@@ -513,6 +592,10 @@ class PPO_Stage1(object):
             self.env.set_global_step(int(self.agent_steps))
 
         for n in range(self.horizon_length):
+            # Store hidden state BEFORE taking action (for training)
+            if self.use_gru and self.hidden_state is not None:
+                self.storage.update_hidden_states(n, self.hidden_state)
+            
             res_dict = self.model_act(self.obs)
             # Collect o_t
             self.storage.update_data('obses', n, self.obs['obs'])
@@ -560,6 +643,15 @@ class PPO_Stage1(object):
 
             self.current_rewards = self.current_rewards * not_dones.unsqueeze(1)
             self.current_lengths = self.current_lengths * not_dones
+            
+            # Reset hidden states for finished episodes
+            if self.use_gru and self.hidden_state is not None:
+                # Get done mask and reset hidden for done environments
+                done_mask = self.dones.bool()
+                if done_mask.any():
+                    # hidden_state shape: (num_layers, num_envs, hidden_size)
+                    # Reset hidden state to zeros for environments that are done
+                    self.hidden_state[:, done_mask, :] = 0.0
 
         res_dict = self.model_act(self.obs)
         last_values = res_dict['values']
@@ -613,6 +705,12 @@ class PPO_Stage1(object):
 
             self.current_rewards = self.current_rewards * not_dones.unsqueeze(1)
             self.current_lengths = self.current_lengths * not_dones
+            
+            # Reset hidden states for finished episodes
+            if self.use_gru and self.hidden_state is not None:
+                done_mask = self.dones.bool()
+                if done_mask.any():
+                    self.hidden_state[:, done_mask, :] = 0.0
         
         res_dict = self.model_act(self.obs)
         self.agent_steps = (self.agent_steps + self.batch_size)
@@ -622,6 +720,10 @@ class PPO_Stage1(object):
         reset_obs, _ = self.env.reset()
         self.obs = {'obs': self.obs2tensor(reset_obs)}
         self.test_steps = self.batch_size
+        
+        # Initialize hidden states for GRU
+        if self.use_gru:
+            self.hidden_state = self.model.get_initial_hidden(self.num_actors, self.device)
 
         while self.test_steps < self.max_test_steps:
             self.play_test_steps()

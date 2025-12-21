@@ -218,7 +218,9 @@ class DcmmVecEnvStage1(gym.Env):
         self.obs_dim = get_total_dimension(self.observation_space)
         self.act_dim = get_total_dimension(self.action_space)
         # Dimension for training
-        self.obs_t_dim = 2 + 3 + 4 + 3 + 3  # Total: 15
+        # Base: 2 (v_lin_2d), Arm: 3+4+3=10 (ee_pos, ee_quat, ee_vel), Object: 3 (pos3d) + 1 (is_valid) = 4
+        # Total: 2 + 10 + 4 = 16 (with validity flag) or 15 (without)
+        self.obs_t_dim = 2 + 3 + 4 + 3 + 3 + 1  # Total: 16 (with is_valid flag)
         self.act_t_dim = 8 # 2 base + 6 arm
         self.obs_c_dim = self.obs_dim - 6  # dim = 30
         self.act_c_dim = 20 # 2 base + 6 arm + 12 hand
@@ -405,6 +407,9 @@ class DcmmVecEnvStage1(gym.Env):
         self.reward_touch = 0
         self.contact_count = 0  # Reset contact counter
         self.reward_stability = 0
+        
+        # Reset observation noise state for domain randomization
+        self.obs_manager.reset_noise_state()
 
         self.info = {
             "ee_distance": np.linalg.norm(self.Dcmm.data.body("link6").xpos -
