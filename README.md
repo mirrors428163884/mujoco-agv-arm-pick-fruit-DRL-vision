@@ -31,7 +31,7 @@
 ## 🚀 快速开始
 
 ### 环境要求
-
+- Linux系统（推荐 Ubuntu 20.04/22.04）
 - Python 3.11（云端部署建议 3.11.x）
 - NVIDIA 驱动支持 CUDA 12.1+（建议 535+），按 GPU/驱动选择匹配的 PyTorch CUDA 版本
 - GPU: 云端 A10/A100/4090 级别或更高（推荐，至少具备 CUDA 加速能力）
@@ -44,9 +44,13 @@
 git clone https://github.com/hwzhanng/Picking_Sorting.git
 cd Picking_Sorting
 
+#安装图形加速库
+sudo apt-get update
+sudo apt-get install -y libegl1-mesa-dev libgl1-mesa-dev libosmesa6-dev libglew-dev
+
 # 2. 创建conda环境
-conda create -n picking python=3.11
-conda activate picking
+conda create -n dcmm python=3.11
+conda activate dcmm
 
 # 3. 安装PyTorch (根据GPU/驱动选择CUDA版本)
 #   示例使用 cu121（驱动>=535）；如需新版可替换为 cu124，更多组合见 https://pytorch.org/get-started/locally/

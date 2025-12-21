@@ -63,7 +63,7 @@ def get_value_at_pos(env, agent, x, y):
 
 @hydra.main(config_name='config_stage2', config_path='configs')
 def main(config: DictConfig):
-    checkpoint_path = "/home/cle/catch_it/outputs/best_reward_-5.72.pth"
+    checkpoint_path = os.path.join(hydra.utils.get_original_cwd(), "outputs/best_reward_-5.72.pth")
     config.checkpoint_catching = checkpoint_path
     config.num_envs = 1
     config.test = True

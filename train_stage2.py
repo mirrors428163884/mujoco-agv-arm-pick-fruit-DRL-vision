@@ -1,8 +1,21 @@
 from __future__ import annotations
 
+import os
+# [必须] 在导入其他库之前设置渲染后端
+os.environ['MUJOCO_GL'] = 'egl'
+
+# [建议] 显式指定使用 NVIDIA 显卡 (设备ID通常为0，防止EGL调用核显)
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
+# [建议] 针对 OpenGL 的优化，防止多上下文冲突
+os.environ["PYOPENGL_PLATFORM"] = "egl"
+
+# 限制 numpy 和 torch 的线程数，防止线程爆炸
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["IN_MPI"] = "1"  # 防止某些库自动多线程
 import hydra
 import torch
-import os
 import random
 import wandb
 from hydra.utils import to_absolute_path
@@ -14,7 +27,6 @@ import gymnasium as gym
 import gym_dcmm
 import datetime
 import pytz
-# os.environ['MUJOCO_GL'] = 'egl'
 OmegaConf.register_new_resolver('resolve_default', lambda default, arg: default if arg=='' else arg)
 
 @hydra.main(config_name='config_stage2', config_path='configs')
@@ -41,9 +53,9 @@ def main(config: DictConfig):
         cprint("Visualization enabled (viewer/imshow_cam). Forcing num_envs = 1 to prevent crash.", 'yellow')
         config.num_envs = 1
 
-    if config.num_envs > 18:
-        cprint(f"Warning: config.num_envs {config.num_envs} is too large for the available CPU cores. Capping at 18.", 'yellow')
-        config.num_envs = 18
+    if config.num_envs > 12:
+        cprint(f"Warning: config.num_envs {config.num_envs} is too large for the available CPU cores. Capping at 12.", 'yellow')
+        config.num_envs = 12
         
     print("config.num_envs: ", config.num_envs)
     env = gym.make_vec(env_name, num_envs=int(config.num_envs), 
