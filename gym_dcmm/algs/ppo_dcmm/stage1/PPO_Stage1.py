@@ -144,7 +144,7 @@ class PPO_Stage1(object):
         self.epoch_num = 0
         
         # GRU sequence length for truncated BPTT
-        self.gru_seq_len = 16  # Chunk horizon into sequences of this length
+        self.gru_seq_len = 32  # Chunk horizon into sequences of this length
         
         # print("self.obs_shape[0]: ", type(self.obs_shape[0]))
         self.storage = ExperienceBuffer(

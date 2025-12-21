@@ -1,5 +1,7 @@
 from __future__ import annotations
 import os
+# 在最开头
+os.sched_setaffinity(0, {i for i in range(16)})
 # [必须] 在导入其他库之前设置渲染后端
 os.environ['MUJOCO_GL'] = 'egl'
 
@@ -55,9 +57,9 @@ def main(config: DictConfig):
         cprint("Visualization enabled (viewer/imshow_cam). Forcing num_envs = 1 to prevent crash.", 'yellow')
         config.num_envs = 1
 
-    if config.num_envs > 12:
+    if config.num_envs > 32:
         cprint(f"Warning: config.num_envs {config.num_envs} is too large for the available CPU cores. Capping at 12.", 'yellow')
-        config.num_envs = 12
+        config.num_envs = 32
         
     print("config.num_envs: ", config.num_envs)
     

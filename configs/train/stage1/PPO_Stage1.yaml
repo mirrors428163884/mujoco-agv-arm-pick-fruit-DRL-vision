@@ -45,10 +45,10 @@ ppo:
   action_catch_denorm: [1.5, 0.05, 0.15]
   
   # [Modified] Increase horizon length for long-term dependency (obstacle avoidance)
-  horizon_length: 512 
+  horizon_length: 2048
   
   # Ensure (num_actors * horizon_length) / minibatch_size is integer
-  minibatch_size: 256
+  minibatch_size: 512
   mini_epochs: 6
   
   critic_coef: 4
