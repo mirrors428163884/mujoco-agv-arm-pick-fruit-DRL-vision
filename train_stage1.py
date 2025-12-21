@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 # 在最开头
-os.sched_setaffinity(0, {i for i in range(16)})
+#os.sched_setaffinity(0, {i for i in range(16)})
 # [必须] 在导入其他库之前设置渲染后端
 os.environ['MUJOCO_GL'] = 'egl'
 

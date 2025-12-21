@@ -210,8 +210,8 @@ class curriculum:
 ## Toggle for ablation studies
 class avp:
     # Master switch - set False for baseline experiments
-    enabled = True
-    
+    enabled = False
+
     # Reward weight range (decays with curriculum)
     lambda_weight_start = 0.8   # Early training: strong AVP guidance
     lambda_weight_end = 0.2     # Late training: rely more on original rewards
