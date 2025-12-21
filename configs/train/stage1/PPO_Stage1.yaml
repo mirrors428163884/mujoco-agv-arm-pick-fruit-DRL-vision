@@ -48,7 +48,7 @@ ppo:
   horizon_length: 512 
   
   # Ensure (num_actors * horizon_length) / minibatch_size is integer
-  minibatch_size: 512
+  minibatch_size: 256
   mini_epochs: 6
   
   critic_coef: 4

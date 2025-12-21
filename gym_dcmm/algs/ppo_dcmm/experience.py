@@ -131,15 +131,19 @@ class ExperienceBuffer(Dataset):
         self.minibatch_size = minibatch_size
         
         # Calculate length based on whether we use GRU (sequence-based) or not
+        # Calculate length based on whether we use GRU (sequence-based) or not
         if self.use_gru:
             # For GRU: num_sequences = (horizon // seq_len) * num_envs
             num_sequences = (self.transitions_per_env // self.seq_len) * self.num_envs
-            # Compute number of minibatches so that all sequences are covered:
-            # length = ceil(num_sequences / minibatch_size)
-            self.length = max(1, (num_sequences + self.minibatch_size - 1) // self.minibatch_size)
-            # Choose an effective GRU minibatch size that does not exceed minibatch_size
-            # and still covers all sequences across `length` minibatches:
-            # gru_minibatch_size = ceil(num_sequences / length)
+
+            # [Fix] 计算每个 Minibatch 应该包含多少个序列
+            # 我们希望总样本数接近 minibatch_size，所以序列数 = minibatch_size // seq_len
+            target_seqs_per_batch = max(1, self.minibatch_size // self.seq_len)
+
+            # 计算总共需要多少个 Minibatch (self.length)
+            self.length = max(1, (num_sequences + target_seqs_per_batch - 1) // target_seqs_per_batch)
+
+            # 反推实际每个 Batch 取多少个序列
             self.gru_minibatch_size = max(1, (num_sequences + self.length - 1) // self.length)
         else:
             self.length = self.batch_size // self.minibatch_size

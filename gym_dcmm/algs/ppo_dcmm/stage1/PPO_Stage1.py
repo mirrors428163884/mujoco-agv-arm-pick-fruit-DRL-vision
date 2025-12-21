@@ -9,12 +9,14 @@ import wandb
 
 import numpy as np
 
+
 from gym_dcmm.algs.ppo_dcmm.experience import ExperienceBuffer
 from gym_dcmm.algs.ppo_dcmm.stage1.ModelsStage1 import ActorCritic
 from gym_dcmm.algs.ppo_dcmm.utils import AverageScalarMeter, RunningMeanStd
 import configs.env.DcmmCfg as DcmmCfg
 
 from tensorboardX import SummaryWriter
+from torch.cuda.amp import autocast, GradScaler
 
 class PPO_Stage1(object):
     def __init__(self, env, output_dif, full_config):
@@ -142,7 +144,7 @@ class PPO_Stage1(object):
         self.epoch_num = 0
         
         # GRU sequence length for truncated BPTT
-        self.gru_seq_len = 32  # Chunk horizon into sequences of this length
+        self.gru_seq_len = 16  # Chunk horizon into sequences of this length
         
         # print("self.obs_shape[0]: ", type(self.obs_shape[0]))
         self.storage = ExperienceBuffer(
@@ -166,6 +168,7 @@ class PPO_Stage1(object):
         self.data_collect_time = 0
         self.rl_train_time = 0
         self.all_time = 0
+        self.scaler = GradScaler()
 
     def write_stats(self, a_losses, c_losses, b_losses, entropies, kls):
         log_dict = {
@@ -373,7 +376,7 @@ class PPO_Stage1(object):
         # Define expected tuple lengths for storage data
         STORAGE_DATA_LEN_WITHOUT_HIDDEN = 8
         STORAGE_DATA_LEN_WITH_HIDDEN = 9
-        
+
         for mini_ep in range(0, self.mini_epochs_num):
             ep_kls = []
             for i in range(len(self.storage)):
@@ -405,57 +408,74 @@ class PPO_Stage1(object):
                     vector_obs = vector_normalized.reshape(batch_size, seq_len, -1)
                 else:
                     vector_obs = self.running_mean_std(obs['vector'])
-                
+
                 processed_obs = {
                     'vector': vector_obs,
                     'image': obs['image']
                 }
-                
+
                 batch_dict = {
                     'prev_actions': actions,
                     'obs': processed_obs,
                 }
-                res_dict = self.model(batch_dict, hidden_states)
-                action_log_probs = res_dict['prev_neglogp']
-                values = res_dict['values']
-                entropy = res_dict['entropy']
-                mu = res_dict['mus']
-                sigma = res_dict['sigmas']
 
-                # actor loss
-                ratio = torch.exp(old_action_log_probs - action_log_probs)
-                surr1 = advantage * ratio
-                surr2 = advantage * torch.clamp(ratio, 1.0 - self.e_clip, 1.0 + self.e_clip)
-                a_loss = torch.max(-surr1, -surr2)
-                # critic loss
-                if self.clip_value_loss:
-                    value_pred_clipped = value_preds + \
-                        (values - value_preds).clamp(-self.e_clip, self.e_clip)
-                    value_losses = (values - returns) ** 2
-                    value_losses_clipped = (value_pred_clipped - returns) ** 2
-                    c_loss = torch.max(value_losses, value_losses_clipped)
-                else:
-                    c_loss = (values - returns) ** 2
-                # bounded loss
-                if self.bounds_loss_coef > 0:
-                    soft_bound = 1.1
-                    mu_loss_high = torch.clamp_min(mu - soft_bound, 0.0) ** 2
-                    mu_loss_low = torch.clamp_max(mu + soft_bound, 0.0) ** 2
-                    b_loss = (mu_loss_low + mu_loss_high).sum(dim=-1)
-                else:
-                    b_loss = 0
-                a_loss, c_loss, entropy, b_loss = [
-                    torch.mean(loss) for loss in [a_loss, c_loss, entropy, b_loss]]
+                # =================================================================================
+                # [AMP 修改开始] 使用混合精度上下文
+                # =================================================================================
+                with autocast():
+                    res_dict = self.model(batch_dict, hidden_states)
+                    action_log_probs = res_dict['prev_neglogp']
+                    values = res_dict['values']
+                    entropy = res_dict['entropy']
+                    mu = res_dict['mus']
+                    sigma = res_dict['sigmas']
 
-                loss = a_loss + 0.5 * c_loss * self.critic_coef - entropy * self.entropy_coef \
-                    + b_loss * self.bounds_loss_coef
+                    # actor loss
+                    ratio = torch.exp(old_action_log_probs - action_log_probs)
+                    surr1 = advantage * ratio
+                    surr2 = advantage * torch.clamp(ratio, 1.0 - self.e_clip, 1.0 + self.e_clip)
+                    a_loss = torch.max(-surr1, -surr2)
 
+                    # critic loss
+                    if self.clip_value_loss:
+                        value_pred_clipped = value_preds + \
+                                             (values - value_preds).clamp(-self.e_clip, self.e_clip)
+                        value_losses = (values - returns) ** 2
+                        value_losses_clipped = (value_pred_clipped - returns) ** 2
+                        c_loss = torch.max(value_losses, value_losses_clipped)
+                    else:
+                        c_loss = (values - returns) ** 2
+
+                    # bounded loss
+                    if self.bounds_loss_coef > 0:
+                        soft_bound = 1.1
+                        mu_loss_high = torch.clamp_min(mu - soft_bound, 0.0) ** 2
+                        mu_loss_low = torch.clamp_max(mu + soft_bound, 0.0) ** 2
+                        b_loss = (mu_loss_low + mu_loss_high).sum(dim=-1)
+                    else:
+                        b_loss = 0
+
+                    a_loss, c_loss, entropy, b_loss = [
+                        torch.mean(loss) for loss in [a_loss, c_loss, entropy, b_loss]]
+
+                    loss = a_loss + 0.5 * c_loss * self.critic_coef - entropy * self.entropy_coef \
+                           + b_loss * self.bounds_loss_coef
+
+                # [AMP 修改] 使用 Scaler 进行反向传播
                 self.optimizer.zero_grad()
-                loss.backward()
+                self.scaler.scale(loss).backward()
 
                 if self.truncate_grads:
+                    # [AMP 修改] Unscale 之后才能进行梯度裁剪
+                    self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
-                self.optimizer.step()
+
+                # [AMP 修改] Step 和 Update
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                # =================================================================================
+                # [AMP 修改结束]
+                # =================================================================================
 
                 with torch.no_grad():
                     # Flatten mu/sigma for KL computation if needed
@@ -625,10 +645,39 @@ class PPO_Stage1(object):
             self.current_lengths += 1
             # print("self.dones: ", self.dones)
             done_indices = self.dones.nonzero(as_tuple=False)
-            # print("done_indices: ", done_indices)
+            # ... (在 done_indices = ... 之后)
+
             self.episode_rewards.update(self.current_rewards[done_indices])
             self.episode_lengths.update(self.current_lengths[done_indices])
-            self.episode_success.update(torch.tensor(truncates, dtype=torch.float32, device=self.device)[done_indices])
+
+            # [Fix 2025-12-21] 正确统计成功率逻辑
+            # 初始化默认为 0 (失败)
+            real_success = torch.zeros(len(done_indices), dtype=torch.float32, device=self.device)
+
+            # Gymnasium VectorEnv 标准: 结束回合的信息保存在 "final_info" 中
+            if "final_info" in infos:
+                final_infos = infos["final_info"]
+                for i, idx in enumerate(done_indices):
+                    env_idx = idx.item()
+                    # final_info[env_idx] 是一个字典，包含该环境结束时的所有 info
+                    info_item = final_infos[env_idx]
+                    if info_item and "is_success" in info_item:
+                        if info_item["is_success"]:
+                            real_success[i] = 1.0
+
+            # 如果不是 VectorEnv (单个环境)，或者是旧版 Gym，可能直接在 info 里
+            elif "is_success" in infos:
+                # 注意：这里拿到的通常是 Reset 后的 info (False)，除非 Wrapper 特殊处理过
+                # 但为了防止键缺失导致的 100% 错误，这里加上判断
+                success_arr = infos['is_success']
+                # 转换为 Tensor
+                if isinstance(success_arr, np.ndarray) or isinstance(success_arr, list):
+                    s_tensor = torch.tensor(success_arr, dtype=torch.float32, device=self.device)
+                    real_success = s_tensor[done_indices]
+
+            # 只有当确实从 info 中提取到了成功信号，才更新；坚决不再回退到 truncates
+            self.episode_success.update(real_success)
+
             assert isinstance(infos, dict), 'Info Should be a Dict'
             # print("infos: ", infos)
             for k, v in infos.items():
@@ -684,10 +733,11 @@ class PPO_Stage1(object):
             # Do env step
             # Clamp the actions of the action space 
             actions = res_dict['actions']
-            actions[:,:] = torch.clamp(actions[:,:], -1, 1)
-            actions = torch.nn.functional.pad(actions, (0, self.full_action_dim-actions.size(1)), value=0)
+            actions[:, :] = torch.clamp(actions[:, :], -1, 1)
+            actions = torch.nn.functional.pad(actions, (0, self.full_action_dim - actions.size(1)), value=0)
             actions_dict = self.action2dict(actions)
             obs, r, terminates, truncates, infos = self.env.step(actions_dict)
+
             # Map the obs
             self.obs = {'obs': self.obs2tensor(obs)}
             # Map the rewards
@@ -696,31 +746,62 @@ class PPO_Stage1(object):
             # Map the dones
             dones = terminates | truncates
             self.dones = torch.tensor(dones, dtype=torch.uint8).to(self.device)
-            # Update dones and rewards after env step
+
+            # Update current rewards/lengths
             self.current_rewards += rewards
             self.current_lengths += 1
+
+            # Find finished envs
             done_indices = self.dones.nonzero(as_tuple=False)
+
+            # Update basic stats
             self.episode_test_rewards.update(self.current_rewards[done_indices])
             self.episode_test_lengths.update(self.current_lengths[done_indices])
-            self.episode_test_success.update(torch.tensor(truncates, dtype=torch.float32, device=self.device)[done_indices])
+
+            # ====================================================
+            # [Fix 2025-12-21] 正确统计测试阶段的成功率
+            # ====================================================
+            real_success = torch.zeros(len(done_indices), dtype=torch.float32, device=self.device)
+
+            if "final_info" in infos:
+                final_infos = infos["final_info"]
+                for i, idx in enumerate(done_indices):
+                    env_idx = idx.item()
+                    info_item = final_infos[env_idx]
+                    # 检查是否成功
+                    if info_item and "is_success" in info_item:
+                        if info_item["is_success"]:
+                            real_success[i] = 1.0
+
+            elif "is_success" in infos:
+                success_arr = infos['is_success']
+                if isinstance(success_arr, np.ndarray) or isinstance(success_arr, list):
+                    s_tensor = torch.tensor(success_arr, dtype=torch.float32, device=self.device)
+                    real_success = s_tensor[done_indices]
+
+            # 更新测试成功率 (注意这里用的是 episode_test_success)
+            self.episode_test_success.update(real_success)
+            # ====================================================
+
+            # Log extra info
             assert isinstance(infos, dict), 'Info Should be a Dict'
             for k, v in infos.items():
-                # only log scalars
                 if isinstance(v, float) or isinstance(v, int) or (isinstance(v, torch.Tensor) and len(v.shape) == 0):
                     self.extra_info[k] = v
 
+            # Reset rewards/lengths for finished envs
             not_dones = 1.0 - self.dones.float()
-
             self.current_rewards = self.current_rewards * not_dones.unsqueeze(1)
             self.current_lengths = self.current_lengths * not_dones
-            
-            # Reset hidden states for finished episodes
+
+            # Reset hidden states for finished episodes (GRU)
             if self.use_gru and self.hidden_state is not None:
                 done_mask = self.dones.bool()
                 if done_mask.any():
                     self.hidden_state[:, done_mask, :] = 0.0
-        
-        res_dict = self.model_act(self.obs)
+
+        # 这一步是为了让 agent_steps 计数增加，虽然 test 不训练，但保持计数一致性
+        # res_dict = self.model_act(self.obs) # Test 阶段其实不需要再计算 value
         self.agent_steps = (self.agent_steps + self.batch_size)
 
     def test(self):
