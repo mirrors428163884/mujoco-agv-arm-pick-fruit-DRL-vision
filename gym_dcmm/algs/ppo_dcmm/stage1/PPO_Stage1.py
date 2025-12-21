@@ -365,12 +365,16 @@ class PPO_Stage1(object):
         self.set_train()
         a_losses, b_losses, c_losses = [], [], []
         entropies, kls = [], []
+        # Define expected tuple lengths for storage data
+        STORAGE_DATA_LEN_WITHOUT_HIDDEN = 8
+        STORAGE_DATA_LEN_WITH_HIDDEN = 9
+        
         for mini_ep in range(0, self.mini_epochs_num):
             ep_kls = []
             for i in range(len(self.storage)):
                 # Get data from storage (with or without hidden states)
                 storage_data = self.storage[i]
-                if self.use_gru and len(storage_data) == 9:
+                if self.use_gru and len(storage_data) == STORAGE_DATA_LEN_WITH_HIDDEN:
                     value_preds, old_action_log_probs, advantage, old_mu, old_sigma, \
                         returns, actions, obs, hidden_states = storage_data
                     # hidden_states shape: (batch, num_layers, hidden_size)
@@ -378,7 +382,7 @@ class PPO_Stage1(object):
                     hidden_states = hidden_states.transpose(0, 1).contiguous()
                 else:
                     value_preds, old_action_log_probs, advantage, old_mu, old_sigma, \
-                        returns, actions, obs = storage_data
+                        returns, actions, obs = storage_data[:STORAGE_DATA_LEN_WITHOUT_HIDDEN]
                     hidden_states = None
 
                 # obs is a dict {'vector': ..., 'image': ...}

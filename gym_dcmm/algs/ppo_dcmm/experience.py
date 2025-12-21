@@ -136,6 +136,13 @@ class ExperienceBuffer(Dataset):
             hidden_states: Tensor of shape (num_layers, num_envs, hidden_size)
         """
         if self.use_gru and hidden_states is not None:
+            # Validate input shape
+            expected_shape = (self.gru_num_layers, self.num_envs, self.gru_hidden_size)
+            if hidden_states.shape != expected_shape:
+                raise ValueError(
+                    f"Hidden states shape mismatch: expected {expected_shape}, "
+                    f"got {tuple(hidden_states.shape)}"
+                )
             # hidden_states comes as (num_layers, num_envs, hidden_size)
             # We need to store as (num_envs, num_layers, hidden_size)
             self.storage_dict['hidden_states'][index] = hidden_states.transpose(0, 1)

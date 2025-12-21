@@ -114,11 +114,9 @@ class ActorCritic(nn.Module):
                 batch_first=True,
                 bidirectional=False
             )
-            # Orthogonal initialization for GRU weights
+            # Orthogonal initialization for GRU weights (only for 2D weight matrices)
             for name, param in self.gru.named_parameters():
-                if 'weight_ih' in name:
-                    nn.init.orthogonal_(param)
-                elif 'weight_hh' in name:
+                if 'weight' in name and param.dim() >= 2:
                     nn.init.orthogonal_(param)
                 elif 'bias' in name:
                     nn.init.zeros_(param)

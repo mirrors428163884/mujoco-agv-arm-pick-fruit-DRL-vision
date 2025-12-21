@@ -312,6 +312,3 @@ class gru_config:
     
     # Number of GRU layers
     num_layers = 1
-    
-    # Whether to use bidirectional GRU (should be False for online RL)
-    bidirectional = False
