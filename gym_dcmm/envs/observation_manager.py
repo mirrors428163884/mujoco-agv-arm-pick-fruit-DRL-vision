@@ -203,7 +203,8 @@ class ObservationManager:
         
         # Add validity flag if configured (helps network distinguish dropped vs valid observations)
         if DcmmCfg.obj_pos_noise.enabled and DcmmCfg.obj_pos_noise.add_validity_flag:
-            obs["object"]["is_valid"] = obj_valid
+            # Return as shape (1,) array to match observation_space definition
+            obs["object"]["is_valid"] = np.array([obj_valid], dtype=np.float32)
 
         # Add depth image if render mode is set
         # Use RenderManager.get_depth_obs() for consistent noise processing across stages

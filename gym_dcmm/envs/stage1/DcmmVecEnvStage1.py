@@ -151,6 +151,14 @@ class DcmmVecEnvStage1(gym.Env):
 
         # Define observation space
         hand_joint_indices = np.where(DcmmCfg.hand_mask == 1)[0] + 15
+
+        # Build object observation space - include is_valid if configured
+        object_space_dict = {
+            "pos3d": spaces.Box(-10, 10, shape=(3,), dtype=np.float32),
+        }
+        if DcmmCfg.obj_pos_noise.enabled and DcmmCfg.obj_pos_noise.add_validity_flag:
+            object_space_dict["is_valid"] = spaces.Box(0, 1, shape=(1,), dtype=np.float32)
+
         self.observation_space = spaces.Dict(
             {
                 "base": spaces.Dict({
@@ -165,9 +173,7 @@ class DcmmVecEnvStage1(gym.Env):
                         high = np.array([self.Dcmm.model.jnt_range[i][1] for i in range(9, 15)]),
                         dtype=np.float32),
                 }),
-                "object": spaces.Dict({
-                    "pos3d": spaces.Box(-10, 10, shape=(3,), dtype=np.float32),
-                }),
+                "object": spaces.Dict(object_space_dict),
                 "depth": spaces.Box(low=0, high=255, shape=(1, self.img_size[0], self.img_size[1]), dtype=np.uint8),
             }
         )

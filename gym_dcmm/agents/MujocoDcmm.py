@@ -11,12 +11,41 @@ from scipy.spatial.transform import Rotation as R
 from collections import deque
 import xml.etree.ElementTree as ET
 
-# Function to convert XML file to string
-def xml_to_string(file_path):
+# Function to convert XML file to string with absolute paths for meshdir and textures
+def xml_to_string_with_abs_paths(file_path):
     try:
+        # Get the directory containing the XML file
+        xml_dir = os.path.dirname(os.path.abspath(file_path))
+
         # Parse the XML file
         tree = ET.parse(file_path)
         root = tree.getroot()
+
+        # Find the compiler element and convert meshdir to absolute path
+        compiler = root.find('compiler')
+        if compiler is not None:
+            meshdir = compiler.get('meshdir')
+            if meshdir is not None:
+                # Convert relative meshdir to absolute path
+                abs_meshdir = os.path.normpath(os.path.join(xml_dir, meshdir))
+                compiler.set('meshdir', abs_meshdir)
+
+        # Convert texture file paths to absolute paths
+        for asset in root.findall('.//asset'):
+            for texture in asset.findall('texture'):
+                file_attr = texture.get('file')
+                if file_attr is not None and not os.path.isabs(file_attr):
+                    # Use meshdir as base for texture files
+                    meshdir = compiler.get('meshdir') if compiler is not None else xml_dir
+                    # Handle both ../textures and ./file patterns
+                    abs_file = os.path.normpath(os.path.join(xml_dir, file_attr))
+                    texture.set('file', abs_file)
+            for mesh in asset.findall('mesh'):
+                file_attr = mesh.get('file')
+                if file_attr is not None and file_attr.startswith('./'):
+                    # Files starting with ./ are relative to meshdir,
+                    # but meshdir is already absolute now, so leave them as-is
+                    pass
 
         # Convert the XML element tree to a string
         xml_str = ET.tostring(root, encoding='unicode')
@@ -57,7 +86,8 @@ class MJ_DCMM(object):
         if model is None:
             if not object_eval: model_path = os.path.join(DcmmCfg.ASSET_PATH, DcmmCfg.XML_DCMM_LEAP_OBJECT_PATH)
             else: model_path = os.path.join(DcmmCfg.ASSET_PATH, DcmmCfg.XML_DCMM_LEAP_UNSEEN_OBJECT_PATH)
-            self.model_xml_string = xml_to_string(model_path)
+            # Convert XML to string with absolute paths for mesh resolution
+            self.model_xml_string = xml_to_string_with_abs_paths(model_path)
         else:
             self.model = model
         if model_arm is None:

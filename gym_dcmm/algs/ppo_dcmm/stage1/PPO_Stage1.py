@@ -508,14 +508,11 @@ class PPO_Stage1(object):
             ]
             # Add validity flag if present (helps network distinguish dropped vs valid observations)
             if "is_valid" in obs["object"]:
-                # is_valid is a scalar, need to expand to match batch dimension
+                # is_valid is now (N, 1) from vec env stacking or (1,) for single env
                 is_valid = obs["object"]["is_valid"]
-                if np.isscalar(is_valid) or is_valid.ndim == 0:
-                    # Single env case
-                    is_valid = np.array([[is_valid]], dtype=np.float32)
-                elif is_valid.ndim == 1:
-                    # Multiple envs: (N,) -> (N, 1)
-                    is_valid = is_valid[:, np.newaxis]
+                if is_valid.ndim == 1:
+                    # Single env case: (1,) -> (1, 1)
+                    is_valid = is_valid[np.newaxis, :]
                 obs_components.append(is_valid)
             obs_array = np.concatenate(obs_components, axis=1)
         
@@ -664,8 +661,19 @@ class PPO_Stage1(object):
         values = self.storage.data_dict['values']
         if self.normalize_value:
             self.value_mean_std.train()
-            values = self.value_mean_std(values)
-            returns = self.value_mean_std(returns)
+            # For GRU mode, values/returns have shape (num_seqs, seq_len, 1)
+            # Flatten to (N, 1) for RunningMeanStd, then reshape back
+            original_shape = values.shape
+            if values.dim() == 3:
+                values_flat = values.reshape(-1, 1)
+                returns_flat = returns.reshape(-1, 1)
+                values_flat = self.value_mean_std(values_flat)
+                returns_flat = self.value_mean_std(returns_flat)
+                values = values_flat.reshape(original_shape)
+                returns = returns_flat.reshape(original_shape)
+            else:
+                values = self.value_mean_std(values)
+                returns = self.value_mean_std(returns)
             self.value_mean_std.eval()
         self.storage.data_dict['values'] = values
         self.storage.data_dict['returns'] = returns
