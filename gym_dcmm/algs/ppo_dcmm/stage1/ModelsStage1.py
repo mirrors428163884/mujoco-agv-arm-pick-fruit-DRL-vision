@@ -166,7 +166,8 @@ class ActorCritic(nn.Module):
             device: Torch device
             
         Returns:
-            Tuple of (actor_hidden, critic_hidden) tensors
+                    Hidden state tensor for the shared GRU of shape
+            (num_layers, batch_size, hidden_size), or None if GRU is disabled.
         """
         if not self.use_gru:
             return None

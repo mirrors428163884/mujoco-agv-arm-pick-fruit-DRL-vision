@@ -20,10 +20,7 @@ def transform_op_sequence(arr, seq_len):
     """
     Transform data for sequence-based sampling (GRU).
     (T, N, ...) -> (num_seqs, seq_len, ...) where num_seqs = (T // seq_len) * N
-    
-    Transform data for sequence-based sampling (GRU).
-    (T, N, ...) -> (num_seqs, seq_len, ...) where num_seqs = (T // seq_len) * N
-    
+
     This preserves temporal ordering within each sequence chunk.
     
     Note: Truncation to exact chunks may discard up to (seq_len - 1) timesteps at the end.
@@ -41,6 +38,11 @@ def transform_op_sequence(arr, seq_len):
     rest_shape = arr.size()[2:]
     
     num_chunks = T // seq_len
+    if num_chunks == 0:
+        raise ValueError(
+            f"transform_op_sequence: sequence length (seq_len={seq_len}) "
+            f"is larger than time dimension (T={T}); cannot form any sequence chunks."
+        )
     # Truncate to fit exact number of chunks (see docstring for data loss implications)
     arr = arr[:num_chunks * seq_len]
     
@@ -132,10 +134,13 @@ class ExperienceBuffer(Dataset):
         if self.use_gru:
             # For GRU: num_sequences = (horizon // seq_len) * num_envs
             num_sequences = (self.transitions_per_env // self.seq_len) * self.num_envs
-            # Ensure at least 1 batch, adjust minibatch_size if needed
-            self.length = max(1, num_sequences // self.minibatch_size)
-            # Store actual minibatch size for GRU (may be smaller than requested)
-            self.gru_minibatch_size = min(self.minibatch_size, num_sequences)
+            # Compute number of minibatches so that all sequences are covered:
+            # length = ceil(num_sequences / minibatch_size)
+            self.length = max(1, (num_sequences + self.minibatch_size - 1) // self.minibatch_size)
+            # Choose an effective GRU minibatch size that does not exceed minibatch_size
+            # and still covers all sequences across `length` minibatches:
+            # gru_minibatch_size = ceil(num_sequences / length)
+            self.gru_minibatch_size = max(1, (num_sequences + self.length - 1) // self.length)
         else:
             self.length = self.batch_size // self.minibatch_size
             self.gru_minibatch_size = self.minibatch_size

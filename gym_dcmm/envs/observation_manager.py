@@ -132,7 +132,7 @@ class ObservationManager:
         if DcmmCfg.obj_pos_noise.consecutive_drop_enabled:
             if np.random.random() < DcmmCfg.obj_pos_noise.consecutive_drop_prob:
                 drop_len_range = DcmmCfg.obj_pos_noise.consecutive_drop_length
-                # Subtract 1 because this frame is already being dropped
+                # Sample total drop length (including this frame); counter stores remaining future drops
                 self._consecutive_drop_counter = np.random.randint(
                     drop_len_range[0], drop_len_range[1] + 1) - 1
                 frame_dropped = True
