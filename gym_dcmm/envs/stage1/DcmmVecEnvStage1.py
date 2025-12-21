@@ -405,6 +405,9 @@ class DcmmVecEnvStage1(gym.Env):
         self.reward_touch = 0
         self.contact_count = 0  # Reset contact counter
         self.reward_stability = 0
+        
+        # Reset observation noise state for domain randomization
+        self.obs_manager.reset_noise_state()
 
         self.info = {
             "ee_distance": np.linalg.norm(self.Dcmm.data.body("link6").xpos -

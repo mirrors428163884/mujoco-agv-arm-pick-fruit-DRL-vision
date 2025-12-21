@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import Dataset
+import configs.env.DcmmCfg as DcmmCfg
 
 
 def transform_op(arr):
@@ -16,7 +17,8 @@ def transform_op(arr):
 
 class ExperienceBuffer(Dataset):
     def __init__(
-        self, num_envs, horizon_length, batch_size, minibatch_size, obs_dim, act_dim, device):
+        self, num_envs, horizon_length, batch_size, minibatch_size, obs_dim, act_dim, device,
+        use_gru=None, gru_hidden_size=None, gru_num_layers=None):
         self.device = device
         self.num_envs = num_envs
         self.transitions_per_env = horizon_length
@@ -24,6 +26,12 @@ class ExperienceBuffer(Dataset):
         self.data_dict = None
         self.obs_dim = obs_dim
         self.act_dim = act_dim
+        
+        # GRU configuration
+        self.use_gru = use_gru if use_gru is not None else DcmmCfg.gru_config.enabled
+        self.gru_hidden_size = gru_hidden_size if gru_hidden_size is not None else DcmmCfg.gru_config.hidden_size
+        self.gru_num_layers = gru_num_layers if gru_num_layers is not None else DcmmCfg.gru_config.num_layers
+        
         self.storage_dict = {
             'rewards': torch.zeros(
                 (self.transitions_per_env, self.num_envs, 1),
@@ -50,6 +58,14 @@ class ExperienceBuffer(Dataset):
                 (self.transitions_per_env, self.num_envs,  1),
                 dtype=torch.float32, device=self.device),
         }
+        
+        # Add hidden state storage if GRU is enabled
+        if self.use_gru:
+            # Store hidden state at the START of each timestep
+            # Shape: (transitions, num_envs, num_layers, hidden_size)
+            self.storage_dict['hidden_states'] = torch.zeros(
+                (self.transitions_per_env, self.num_envs, self.gru_num_layers, self.gru_hidden_size),
+                dtype=torch.float32, device=self.device)
 
         if isinstance(self.obs_dim, dict):
             self.storage_dict['obses'] = {}
@@ -87,9 +103,16 @@ class ExperienceBuffer(Dataset):
                 input_dict[k] = v_dict
             else:
                 input_dict[k] = v[start:end]
-        return input_dict['values'], input_dict['neglogpacs'], input_dict['advantages'], \
-            input_dict['mus'], input_dict['sigmas'], input_dict['returns'], input_dict['actions'], \
-            input_dict['obses']
+        
+        # Return hidden_states if GRU is enabled
+        if self.use_gru and 'hidden_states' in input_dict:
+            return input_dict['values'], input_dict['neglogpacs'], input_dict['advantages'], \
+                input_dict['mus'], input_dict['sigmas'], input_dict['returns'], input_dict['actions'], \
+                input_dict['obses'], input_dict['hidden_states']
+        else:
+            return input_dict['values'], input_dict['neglogpacs'], input_dict['advantages'], \
+                input_dict['mus'], input_dict['sigmas'], input_dict['returns'], input_dict['actions'], \
+                input_dict['obses']
 
     def update_mu_sigma(self, mu, sigma):
         start = self.last_range[0]
@@ -103,6 +126,19 @@ class ExperienceBuffer(Dataset):
                 self.storage_dict[name][k][index,:] = v
         else:
             self.storage_dict[name][index,:] = val
+    
+    def update_hidden_states(self, index, hidden_states):
+        """
+        Store hidden states at a given timestep.
+        
+        Args:
+            index: Timestep index
+            hidden_states: Tensor of shape (num_layers, num_envs, hidden_size)
+        """
+        if self.use_gru and hidden_states is not None:
+            # hidden_states comes as (num_layers, num_envs, hidden_size)
+            # We need to store as (num_envs, num_layers, hidden_size)
+            self.storage_dict['hidden_states'][index] = hidden_states.transpose(0, 1)
 
     def compute_return(self, last_values, gamma, tau):
         last_gae_lam = 0

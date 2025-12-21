@@ -279,3 +279,39 @@ class ground_dr:
     
     # Ground types: soil_dry, soil_wet, grass, gravel
     ground_types = ['soil_dry', 'soil_wet', 'grass', 'gravel']
+
+
+## Object Position Noise Configuration (Domain Randomization for obj_pos)
+## Simulates YOLO detection noise and frame drops
+class obj_pos_noise:
+    # Master switch
+    enabled = True
+    
+    # Gaussian noise (simulates sensor random measurement errors)
+    gaussian_enabled = True
+    gaussian_std = 0.02  # Standard deviation in meters (2cm noise)
+    
+    # Frame drop simulation (simulates YOLO detection failures)
+    frame_drop_enabled = True
+    drop_probability = 0.1  # 10% chance of frame drop per step
+    drop_use_zero = False   # If True, set to 0; if False, use previous frame value
+    
+    # Consecutive frame drop simulation (simulates prolonged detection loss)
+    consecutive_drop_enabled = True
+    consecutive_drop_prob = 0.05  # 5% chance to start consecutive drop sequence
+    consecutive_drop_length = (2, 5)  # Range of consecutive frames to drop
+
+
+## GRU (Recurrent Neural Network) Configuration for memory
+class gru_config:
+    # Master switch for RNN
+    enabled = True
+    
+    # GRU hidden size
+    hidden_size = 128
+    
+    # Number of GRU layers
+    num_layers = 1
+    
+    # Whether to use bidirectional GRU (should be False for online RL)
+    bidirectional = False
