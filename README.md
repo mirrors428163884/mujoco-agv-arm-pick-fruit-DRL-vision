@@ -50,7 +50,7 @@ conda activate picking
 
 # 3. 安装PyTorch (根据GPU/驱动选择CUDA版本)
 #   示例使用 cu121（驱动>=535）；如需新版可替换为 cu124，更多组合见 https://pytorch.org/get-started/locally/
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install " torch >=2.4.0" " torchvision >=0.20.0" " torchaudio >=2.4.0" --index-url https://download.pytorch.org/whl/cu121
 
 # 4. 安装项目依赖（版本未钉死，可随CUDA/驱动灵活选择）
 pip install -r requirements.txt
