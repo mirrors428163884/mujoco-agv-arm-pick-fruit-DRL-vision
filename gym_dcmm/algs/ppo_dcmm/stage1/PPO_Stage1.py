@@ -140,12 +140,17 @@ class PPO_Stage1(object):
 
         self.obs = None
         self.epoch_num = 0
+        
+        # GRU sequence length for truncated BPTT
+        self.gru_seq_len = 32  # Chunk horizon into sequences of this length
+        
         # print("self.obs_shape[0]: ", type(self.obs_shape[0]))
         self.storage = ExperienceBuffer(
             self.num_actors, self.horizon_length, self.batch_size, self.minibatch_size,
             self.obs_shape, self.actions_num, self.device,
             use_gru=self.use_gru, gru_hidden_size=self.gru_hidden_size, 
             gru_num_layers=self.gru_num_layers,
+            seq_len=self.gru_seq_len,
         )
 
         batch_size = self.num_actors
@@ -377,8 +382,12 @@ class PPO_Stage1(object):
                 if self.use_gru and len(storage_data) == STORAGE_DATA_LEN_WITH_HIDDEN:
                     value_preds, old_action_log_probs, advantage, old_mu, old_sigma, \
                         returns, actions, obs, hidden_states = storage_data
-                    # hidden_states shape: (batch, num_layers, hidden_size)
-                    # Need to transpose to (num_layers, batch, hidden_size) for GRU
+                    # For sequence-based training:
+                    # hidden_states shape: (batch, seq_len, num_layers, hidden_size)
+                    # We only need the hidden state at the start of each sequence
+                    # Take hidden state at t=0: (batch, num_layers, hidden_size)
+                    hidden_states = hidden_states[:, 0, :, :]
+                    # Transpose to (num_layers, batch, hidden_size) for GRU
                     hidden_states = hidden_states.transpose(0, 1).contiguous()
                 else:
                     value_preds, old_action_log_probs, advantage, old_mu, old_sigma, \
@@ -386,7 +395,17 @@ class PPO_Stage1(object):
                     hidden_states = None
 
                 # obs is a dict {'vector': ..., 'image': ...}
-                vector_obs = self.running_mean_std(obs['vector'])
+                # For GRU: obs['vector'] shape is (batch, seq_len, features)
+                # For MLP: obs['vector'] shape is (batch, features)
+                if self.use_gru and obs['vector'].dim() == 3:
+                    # Normalize each timestep in the sequence
+                    batch_size, seq_len = obs['vector'].shape[0], obs['vector'].shape[1]
+                    vector_flat = obs['vector'].reshape(batch_size * seq_len, -1)
+                    vector_normalized = self.running_mean_std(vector_flat)
+                    vector_obs = vector_normalized.reshape(batch_size, seq_len, -1)
+                else:
+                    vector_obs = self.running_mean_std(obs['vector'])
+                
                 processed_obs = {
                     'vector': vector_obs,
                     'image': obs['image']
@@ -422,7 +441,7 @@ class PPO_Stage1(object):
                     soft_bound = 1.1
                     mu_loss_high = torch.clamp_min(mu - soft_bound, 0.0) ** 2
                     mu_loss_low = torch.clamp_max(mu + soft_bound, 0.0) ** 2
-                    b_loss = (mu_loss_low + mu_loss_high).sum(axis=-1)
+                    b_loss = (mu_loss_low + mu_loss_high).sum(dim=-1)
                 else:
                     b_loss = 0
                 a_loss, c_loss, entropy, b_loss = [
@@ -439,7 +458,12 @@ class PPO_Stage1(object):
                 self.optimizer.step()
 
                 with torch.no_grad():
-                    kl_dist = policy_kl(mu.detach(), sigma.detach(), old_mu, old_sigma)
+                    # Flatten mu/sigma for KL computation if needed
+                    mu_flat = mu.reshape(-1, mu.shape[-1]) if mu.dim() == 3 else mu
+                    sigma_flat = sigma.reshape(-1, sigma.shape[-1]) if sigma.dim() == 3 else sigma
+                    old_mu_flat = old_mu.reshape(-1, old_mu.shape[-1]) if old_mu.dim() == 3 else old_mu
+                    old_sigma_flat = old_sigma.reshape(-1, old_sigma.shape[-1]) if old_sigma.dim() == 3 else old_sigma
+                    kl_dist = policy_kl(mu_flat.detach(), sigma_flat.detach(), old_mu_flat, old_sigma_flat)
 
                 kl = kl_dist
                 a_losses.append(a_loss)
@@ -476,12 +500,24 @@ class PPO_Stage1(object):
                         obs["hand"],
                         ), axis=1)
         else:
-            obs_array = np.concatenate((
-                    obs["base"]["v_lin_2d"], 
-                    obs["arm"]["ee_pos3d"], obs["arm"]["ee_quat"], obs["arm"]["ee_v_lin_3d"],
-                    obs["object"]["pos3d"],  # Removed v_lin_3d (static object)
-                    # obs["hand"],# TODO: TEST
-                    ), axis=1)
+            # Build list of observation components
+            obs_components = [
+                obs["base"]["v_lin_2d"], 
+                obs["arm"]["ee_pos3d"], obs["arm"]["ee_quat"], obs["arm"]["ee_v_lin_3d"],
+                obs["object"]["pos3d"],
+            ]
+            # Add validity flag if present (helps network distinguish dropped vs valid observations)
+            if "is_valid" in obs["object"]:
+                # is_valid is a scalar, need to expand to match batch dimension
+                is_valid = obs["object"]["is_valid"]
+                if np.isscalar(is_valid) or is_valid.ndim == 0:
+                    # Single env case
+                    is_valid = np.array([[is_valid]], dtype=np.float32)
+                elif is_valid.ndim == 1:
+                    # Multiple envs: (N,) -> (N, 1)
+                    is_valid = is_valid[:, np.newaxis]
+                obs_components.append(is_valid)
+            obs_array = np.concatenate(obs_components, axis=1)
         
         vector_tensor = torch.tensor(obs_array, dtype=torch.float32).to(self.device)
         

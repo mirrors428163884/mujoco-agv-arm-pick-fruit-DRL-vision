@@ -300,6 +300,9 @@ class obj_pos_noise:
     consecutive_drop_enabled = True
     consecutive_drop_prob = 0.05  # 5% chance to start consecutive drop sequence
     consecutive_drop_length = (2, 5)  # Range of consecutive frames to drop
+    
+    # Observation validity flag (helps network distinguish dropped vs valid observations)
+    add_validity_flag = True  # If True, adds 1-bit is_valid flag to observation
 
 
 ## GRU (Recurrent Neural Network) Configuration for memory

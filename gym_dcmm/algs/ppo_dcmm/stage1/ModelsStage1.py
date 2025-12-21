@@ -237,6 +237,8 @@ class ActorCritic(nn.Module):
         
         Args:
             obs_dict: Dictionary with 'obs' key containing observations
+                     For inference: obs shape is (batch, features)
+                     For training with GRU: obs shape is (batch, seq_len, features)
             hidden_state: GRU hidden state (num_layers, batch, hidden_size)
             
         Returns:
@@ -245,15 +247,6 @@ class ActorCritic(nn.Module):
             value: State value
             new_hidden: Updated hidden state (or None if GRU not used)
         """
-        # obs_dict['obs'] is expected to be a dict or contain both parts
-        # But PPO storage usually flattens things.
-        # We need to check how PPO passes data.
-        # In PPO_Track.model_act, it passes {'obs': processed_obs}
-        # processed_obs comes from running_mean_std.
-        
-        # If we changed obs to be a dict in PPO, then processed_obs is a dict?
-        # We need to ensure PPO passes 'vector' and 'image' correctly.
-        
         if isinstance(obs_dict['obs'], dict):
             vector_obs = obs_dict['obs']['vector']
             if self.use_vision:
@@ -262,20 +255,40 @@ class ActorCritic(nn.Module):
             # Fallback if obs is just tensor (legacy)
             vector_obs = obs_dict['obs']
             image_obs = None
-
-        if self.use_vision and image_obs is not None:
-            # Process Image
-            img_features = self.cnn(image_obs)
-            # Concatenate
-            x = torch.cat([vector_obs, img_features], dim=1)
+        
+        # Check if we have sequence data (for GRU training)
+        # Shape: (batch, features) for inference or (batch, seq_len, features) for training
+        has_sequence = vector_obs.dim() == 3
+        
+        if has_sequence:
+            batch_size, seq_len = vector_obs.shape[0], vector_obs.shape[1]
+            # Flatten for CNN processing: (batch * seq_len, features)
+            vector_obs_flat = vector_obs.reshape(batch_size * seq_len, -1)
+            if self.use_vision and image_obs is not None:
+                # image_obs shape: (batch, seq_len, C, H, W)
+                img_shape = image_obs.shape[2:]
+                image_obs_flat = image_obs.reshape(batch_size * seq_len, *img_shape)
         else:
-            x = vector_obs
+            vector_obs_flat = vector_obs
+            image_obs_flat = image_obs if image_obs is not None else None
+
+        if self.use_vision and image_obs_flat is not None:
+            # Process Image
+            img_features = self.cnn(image_obs_flat)
+            # Concatenate
+            x = torch.cat([vector_obs_flat, img_features], dim=-1)
+        else:
+            x = vector_obs_flat
         
         # Process through GRU if enabled
         new_hidden = None
         if self.use_gru and self.gru is not None:
-            # Add sequence dimension for GRU: (batch, features) -> (batch, 1, features)
-            x = x.unsqueeze(1)
+            if has_sequence:
+                # Reshape back to sequence: (batch * seq_len, hidden) -> (batch, seq_len, hidden)
+                x = x.reshape(batch_size, seq_len, -1)
+            else:
+                # Add sequence dimension for GRU: (batch, features) -> (batch, 1, features)
+                x = x.unsqueeze(1)
             
             # Pass through GRU
             if hidden_state is not None:
@@ -283,8 +296,14 @@ class ActorCritic(nn.Module):
             else:
                 gru_out, new_hidden = self.gru(x)
             
-            # Remove sequence dimension: (batch, 1, hidden) -> (batch, hidden)
-            x = gru_out.squeeze(1)
+            if has_sequence:
+                # Keep sequence dimension for training: (batch, seq_len, hidden)
+                x = gru_out
+                # Flatten for MLP: (batch * seq_len, hidden)
+                x = x.reshape(batch_size * seq_len, -1)
+            else:
+                # Remove sequence dimension for inference: (batch, 1, hidden) -> (batch, hidden)
+                x = gru_out.squeeze(1)
 
         x_actor = self.actor_mlp(x)
         mu = self.mu(x_actor)
@@ -299,6 +318,12 @@ class ActorCritic(nn.Module):
         sigma = self.sigma
         # Normalize to (-1,1)
         mu = torch.tanh(mu)
+        
+        # Reshape output back to sequence format if needed
+        if has_sequence:
+            mu = mu.reshape(batch_size, seq_len, -1)
+            value = value.reshape(batch_size, seq_len, -1)
+        
         return mu, mu * 0 + sigma, value, new_hidden
 
     def forward(self, input_dict, hidden_state=None):
@@ -307,6 +332,7 @@ class ActorCritic(nn.Module):
         
         Args:
             input_dict: Dictionary with 'obs' and 'prev_actions'
+                       For GRU: obs shape is (batch, seq_len, features)
             hidden_state: GRU hidden state
             
         Returns:
@@ -316,10 +342,20 @@ class ActorCritic(nn.Module):
         mu, logstd, value, new_hidden = self._actor_critic(input_dict, hidden_state)
         sigma = torch.exp(logstd)
         distr = torch.distributions.Normal(mu, sigma)
-        entropy = distr.entropy().sum(dim=-1)
-        prev_neglogp = -distr.log_prob(prev_actions).sum(1)
+        
+        # Handle sequence dimension for GRU training
+        if mu.dim() == 3:
+            # mu shape: (batch, seq_len, act_dim)
+            # prev_actions shape: (batch, seq_len, act_dim)
+            entropy = distr.entropy().sum(dim=-1)  # (batch, seq_len)
+            prev_neglogp = -distr.log_prob(prev_actions).sum(dim=-1)  # (batch, seq_len)
+        else:
+            # Standard case: (batch, act_dim)
+            entropy = distr.entropy().sum(dim=-1)
+            prev_neglogp = -distr.log_prob(prev_actions).sum(dim=-1)
+        
         result = {
-            'prev_neglogp': torch.squeeze(prev_neglogp),
+            'prev_neglogp': prev_neglogp,
             'values': value,
             'entropy': entropy,
             'mus': mu,
