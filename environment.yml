@@ -52,7 +52,7 @@ dependencies:
     - imageio>=2.35.1
     
     # Visualization
-    - PyOpenGL>=3.1.0
+    - PyOpenGL>=3.1.10
     - glfw>=2.10.0
     
     # Configuration
