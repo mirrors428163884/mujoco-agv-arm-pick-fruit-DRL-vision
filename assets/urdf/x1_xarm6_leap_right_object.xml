@@ -1,5 +1,5 @@
 <mujoco model="chassis_with_arm">
-    <compiler angle="radian" meshdir="/home/cle/catch_it/assets/meshes" autolimits="true"/>
+    <compiler angle="radian" meshdir="../meshes" autolimits="true"/>
     
     <!-- Plant Defaults -->
     <default>
@@ -26,11 +26,11 @@
         <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
         <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3"
         markrgb="0.8 0.8 0.8" width="300" height="300"/>
-        <texture file="/home/cle/catch_it/assets/textures/light-wood.png" name="woodplane" type="2d"/>
+        <texture file="../textures/light-wood.png" name="woodplane" type="2d"/>
         <material name="groundplane" texture="woodplane" texuniform="true" texrepeat="5 5" reflectance="0.2"/>
         <!-- object-bottle -->
         <mesh file="./bottle.stl" name="bottle_mesh" scale="0.8 0.8 0.8"/>
-        <texture type="skybox" file="/home/cle/catch_it/assets/textures/glass.png" name="tex-glass"/>
+        <texture type="skybox" file="../textures/glass.png" name="tex-glass"/>
         <material name="glass" reflectance="0.5" texrepeat="5 5" texture="tex-glass" texuniform="true"/>
         <mesh file="./bread.stl" name="bread_mesh" scale="1 1 1"/>
         <mesh file="./cup.stl" name="cup_mesh" scale="0.7 0.7 0.7"/>
@@ -38,10 +38,10 @@
         <mesh file="./winnercup.stl" name="winnercup_mesh" scale="3e-4 3e-4 3e-4"/>
         <!-- object-can -->
         <mesh file="./can.stl" name="can_mesh"/>
-        <texture file="/home/cle/catch_it/assets/textures/soda.png" name="tex-can" type="2d"/>
+        <texture file="../textures/soda.png" name="tex-can" type="2d"/>
         <material name="coke" reflectance="0.7" texrepeat="5 5" texture="tex-can" texuniform="true"/>
         <!-- object red can-->
-        <texture file="/home/cle/catch_it/assets/textures/red-wood.png" name="tex-red-can" type="2d"/>
+        <texture file="../textures/red-wood.png" name="tex-red-can" type="2d"/>
         <material name="red-coke" reflectance="0.7" texrepeat="5 5" texture="tex-red-can" texuniform="true"/>
         <!-- mobile manipulator -->
         <!-- Ranger Mini V2 -->
