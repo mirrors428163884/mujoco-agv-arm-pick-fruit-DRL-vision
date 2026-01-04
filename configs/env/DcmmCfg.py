@@ -232,11 +232,45 @@ hand_mask = np.array([1, 0, 1, 1,
                       0, 1, 1, 1])
 
 class curriculum:
-    # Define stage switching thresholds (steps)
+    # ========================================
+    # Stage 1 Curriculum (Tracking/Approach)
+    # ========================================
     stage1_steps = 2e6  # First 2M steps
+    
+    # [NEW 2025-01-04] Stage 1 distance-based initialization curriculum
+    # Start with closer targets, gradually increase range
+    stage1_init_dist_start = (0.8, 1.2)   # Initial target distance range (meters)
+    stage1_init_dist_mid = (0.6, 1.8)     # Mid-training distance range
+    stage1_init_dist_full = (0.4, 2.5)    # Full difficulty distance range
+    stage1_dist_expand_step1 = 1e6        # Step to expand to mid range (1M)
+    stage1_dist_expand_step2 = 3e6        # Step to expand to full range (3M)
+    
+    # ========================================
+    # Stage 2 Curriculum (Grasping)
+    # [NEW 2025-01-04] Three-phase curriculum for grasp learning
+    # ========================================
     stage2_steps = 10e6  # Extended curriculum period
     
-    # Two-phase training configuration
+    # Phase 0: Learn basic grasp (weak DR, close init)
+    stage2_phase0_steps = 2e6             # First 2M steps
+    stage2_phase0_init_dist = (0.03, 0.06)  # Very close initialization
+    stage2_phase0_angle_err = 10            # Max initial angle error (degrees)
+    stage2_phase0_dr_scale = 0.3            # Weak domain randomization
+    
+    # Phase 1: Learn stable grasp (add slip penalty, increase randomization)
+    stage2_phase1_steps = 6e6             # Duration: 6M steps (runs from 2M to 8M)
+    stage2_phase1_init_dist = (0.03, 0.12)  # Wider initialization
+    stage2_phase1_angle_err = 20            # More angle variation
+    stage2_phase1_slip_weight_start = 0.2   # Gradually increase slip penalty
+    stage2_phase1_slip_weight_end = 1.0
+    
+    # Phase 2: Learn perturbation resistance (perturbation after grasp)
+    stage2_phase2_steps = 4e6             # Duration: 4M steps (runs from 8M to 12M)
+    stage2_phase2_perturbation_start_success = 0.60  # Only perturb if success > 60%
+    
+    # ========================================
+    # Two-phase training configuration (Actor/Critic)
+    # ========================================
     # [Modified 2025-12-09] Phase 1 extended from 5M to 15M steps
     phase1_steps = 15e6  # Phase 1: Learn grasping (Actor + Critic)
     phase2_steps = 10e6  # Phase 2: Learn value discrimination (Critic only)
@@ -244,6 +278,9 @@ class curriculum:
     # [New] Success rate threshold for phase switching
     phase_switch_success_threshold = 0.30  # 30% success rate required
 
+    # ========================================
+    # Collision and Orientation Curriculum
+    # ========================================
     # [Fix 2025-12-19] Much gentler stem collision penalty for early training
     # Start almost zero, gradually increase
     collision_stem_start = -0.1
@@ -259,17 +296,44 @@ class curriculum:
 
 ## AVP (Asymmetric Value Propagation) Configuration
 ## Toggle for ablation studies
+## [REFACTORED 2025-01-04] Added potential-based shaping, OOD gating, adaptive lambda
 class avp:
     # Master switch - set False for baseline experiments
     enabled = False
 
-    # Reward weight range (decays with curriculum)
-    lambda_weight_start = 0.8   # Early training: strong AVP guidance
-    lambda_weight_end = 0.2     # Late training: rely more on original rewards
+    # ========================================
+    # Lambda Scheduling (Curriculum-Based)
+    # ========================================
+    # Legacy weights (now used as fallback bounds)
+    lambda_weight_start = 0.8   # Not used directly anymore
+    lambda_weight_end = 0.2     # Not used directly anymore
     
-    # Distance gate - only compute AVP when EE is closer than this (meters)
+    # [NEW 2025-01-04] Adaptive lambda scheduling
+    # Note: Uses curriculum difficulty (step-based) as proxy for progress
+    warmup_steps = 500000       # 0.5M steps: λ=0 (let progress reward dominate first)
+    lambda_max = 0.4            # Max λ during mid-training phase
+    lambda_min = 0.1            # Min λ during late-training decay phase
+    
+    # ========================================
+    # Distance Gate
+    # ========================================
+    # Only compute AVP when EE is closer than this (meters)
     gate_distance = 1.5
     
+    # ========================================
+    # OOD/Confidence Gating
+    # ========================================
+    # [NEW 2025-01-04] Visual validity gate
+    depth_valid_threshold = 0.6  # Minimum valid depth pixel ratio (60%)
+    
+    # [NEW 2025-01-04] MC Dropout uncertainty gating
+    mc_dropout_samples = 5       # Number of MC samples (K=5)
+    uncertainty_alpha = 2.0      # exp(-α·σ) confidence scale
+    min_confidence = 0.3         # Minimum confidence threshold for gating
+    
+    # ========================================
+    # Checkpoint and Network Config
+    # ========================================
     # Checkpoint path for Stage 2 Critic (relative to project root)
     checkpoint_path = "assets/checkpoints/avp/stage2_critic.pth"
     
