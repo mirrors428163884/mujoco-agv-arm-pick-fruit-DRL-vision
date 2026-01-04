@@ -167,15 +167,16 @@ class RewardManagerStage2:
         step = self.env.global_step
         
         # Phase 0: No perturbation
-        phase0_end = DcmmCfg.curriculum.stage2_phase0_steps
+        phase0_end = DcmmCfg.curriculum.stage2_phase0_steps  # 2M
         if step < phase0_end:
             return False
         
-        # Phase 1: Gradual ramp-up
-        phase1_end = DcmmCfg.curriculum.stage2_phase1_steps
+        # Phase 1: Gradual ramp-up (duration is stage2_phase1_steps, so end = phase0_end + duration)
+        phase1_end = phase0_end + DcmmCfg.curriculum.stage2_phase1_steps  # 2M + 6M = 8M
         if step < phase1_end:
             # Linear ramp from 10% to 30%
-            prob = 0.1 + 0.2 * ((step - phase0_end) / (phase1_end - phase0_end))
+            phase1_duration = phase1_end - phase0_end
+            prob = 0.1 + 0.2 * ((step - phase0_end) / phase1_duration)
             return np.random.random() < prob
         
         # Phase 2: Only apply if success rate is high enough
@@ -529,15 +530,17 @@ class RewardManagerStage2:
         """
         # Get curriculum-adjusted slip weight
         step = self.env.global_step
-        phase0_end = DcmmCfg.curriculum.stage2_phase0_steps
-        phase1_end = DcmmCfg.curriculum.stage2_phase1_steps
+        phase0_end = DcmmCfg.curriculum.stage2_phase0_steps  # 2M
+        # phase1_end = phase0_end + duration of phase 1
+        phase1_end = phase0_end + DcmmCfg.curriculum.stage2_phase1_steps  # 2M + 6M = 8M
         
         if step < phase0_end:
             # Phase 0: Weak slip penalty
             k_s = DcmmCfg.curriculum.stage2_phase1_slip_weight_start
         elif step < phase1_end:
             # Phase 1: Ramp up slip penalty
-            progress = (step - phase0_end) / (phase1_end - phase0_end)
+            phase1_duration = phase1_end - phase0_end
+            progress = (step - phase0_end) / phase1_duration
             slip_start = DcmmCfg.curriculum.stage2_phase1_slip_weight_start
             slip_end = DcmmCfg.curriculum.stage2_phase1_slip_weight_end
             k_s = slip_start + (slip_end - slip_start) * progress

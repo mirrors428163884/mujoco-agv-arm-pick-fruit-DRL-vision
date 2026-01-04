@@ -1009,14 +1009,12 @@ class RewardManagerStage1:
         - Warm-up: λ=0 (handled in compute_avp_reward)
         - Ramp-up: When success_rate > 10%, λ → lambda_max (0.4)
         - Decay: When success_rate > 60%, λ → lambda_min (0.1)
-        """
-        # Try to get success rate from environment
-        success_rate = 0.0
-        if hasattr(self.env, 'reward_manager'):
-            # Get from episode success tracking (if available)
-            pass  # Will be computed by PPO
         
-        # For now, use curriculum difficulty as proxy until success rate tracking is available
+        Note: Currently uses curriculum difficulty as a proxy for success rate.
+        Future improvement could integrate actual episode success rate from PPO.
+        """
+        # Use curriculum difficulty as proxy for success rate
+        # This provides a smooth schedule without requiring success rate tracking
         if hasattr(self.env, 'curriculum_difficulty'):
             difficulty = self.env.curriculum_difficulty
             # Early training (difficulty < 0.3): ramp up lambda

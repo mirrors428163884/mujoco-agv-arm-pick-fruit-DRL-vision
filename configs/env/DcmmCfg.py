@@ -258,14 +258,14 @@ class curriculum:
     stage2_phase0_dr_scale = 0.3            # Weak domain randomization
     
     # Phase 1: Learn stable grasp (add slip penalty, increase randomization)
-    stage2_phase1_steps = 6e6             # Steps 2M-8M
+    stage2_phase1_steps = 6e6             # Duration: 6M steps (runs from 2M to 8M)
     stage2_phase1_init_dist = (0.03, 0.12)  # Wider initialization
     stage2_phase1_angle_err = 20            # More angle variation
     stage2_phase1_slip_weight_start = 0.2   # Gradually increase slip penalty
     stage2_phase1_slip_weight_end = 1.0
     
     # Phase 2: Learn perturbation resistance (perturbation after grasp)
-    stage2_phase2_steps = 4e6             # Steps 8M-12M
+    stage2_phase2_steps = 4e6             # Duration: 4M steps (runs from 8M to 12M)
     stage2_phase2_perturbation_start_success = 0.60  # Only perturb if success > 60%
     
     # ========================================
