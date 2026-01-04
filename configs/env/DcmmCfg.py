@@ -19,6 +19,11 @@ WEIGHT_PATH = os.path.join(ASSET_PATH, "weights")
 ## 0.25m was too early, causing Stage2 to learn both approach + grasp simultaneously
 distance_thresh = 0.10
 
+## [NEW 2025-01-04] Default control frequency setting
+## Reduced from 20 to 10 for higher control frequency and lower latency
+## This improves responsiveness of the base controller
+default_steps_per_policy = 10
+
 ## Define the initial joint positions of the arm and the hand
 # Pre-grasp pose for maximum flexibility (Stage 2 optimized)
 # [Fix 2025-12-09] Updated to be within joint limits:
@@ -202,9 +207,12 @@ Kd_drive = 1e-1
 llim_drive = -200
 ulim_drive = 200
 # steering
-Kp_steer = 50.0
+# [UPDATED 2025-01-04] Reduced Kp_steer from 50.0 to 35.0 to prevent oscillation
+# when using higher control frequency (steps_per_policy=10 instead of 20)
+# Increased Kd_steer from 7.5 to 10.0 for better damping
+Kp_steer = 35.0
 Ki_steer = 2.5
-Kd_steer = 7.5
+Kd_steer = 10.0
 llim_steer = -50
 ulim_steer = 50
 
@@ -234,8 +242,11 @@ hand_mask = np.array([1, 0, 1, 1,
 class curriculum:
     # ========================================
     # Stage 1 Curriculum (Tracking/Approach)
+    # [FIX 2025-01-04] Aligned stage1_steps with curriculum expansion schedule
+    # Previously: stage1_steps=2M but dist_expand_step2=3M caused curriculum to
+    # never reach full difficulty. Now both are aligned at 3M.
     # ========================================
-    stage1_steps = 2e6  # First 2M steps
+    stage1_steps = 3e6  # Curriculum runs for 3M steps to reach full difficulty
     
     # [NEW 2025-01-04] Stage 1 distance-based initialization curriculum
     # Start with closer targets, gradually increase range

@@ -4,7 +4,7 @@ Handles all observation collection and processing.
 """
 
 import numpy as np
-from gym_dcmm.utils.quat_utils import quat_rotate_vector
+from gym_dcmm.utils.quat_utils import quat_rotate_vector, quat_to_euler, angle_diff
 import cv2 as cv
 import configs.env.DcmmCfg as DcmmCfg
 
@@ -39,6 +39,45 @@ class ObservationManager:
         base_vel_base = quat_rotate_vector(base_quat_inv, base_vel_world_3d)
 
         return base_vel_base[0:2]
+    
+    def get_base_heading_obs(self):
+        """
+        Get base heading observation for Stage 1.
+        
+        [NEW 2025-01-04] Added to provide explicit chassis orientation information
+        to the agent. Returns both absolute heading (sin/cos) and relative heading
+        to target (angle difference).
+        
+        Returns:
+            np.ndarray: [sin(heading), cos(heading), sin(angle_to_target), cos(angle_to_target)]
+                        Shape: (4,), dtype: np.float32
+        """
+        # Get base position and orientation
+        base_pos = self.env.Dcmm.data.body("arm_base").xpos[:2]
+        base_quat = self.env.Dcmm.data.body("arm_base").xquat
+        
+        # Extract yaw (heading) from quaternion
+        base_heading = quat_to_euler(base_quat)[2]  # yaw
+        
+        # Get target position
+        obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos[:2]
+        
+        # Compute direction to target
+        to_target = obj_pos - base_pos
+        target_heading = np.arctan2(to_target[1], to_target[0])
+        
+        # Compute relative angle (heading error)
+        heading_error = angle_diff(target_heading, base_heading)
+        
+        # Return sin/cos representation (continuous, no discontinuities)
+        heading_obs = np.array([
+            np.sin(base_heading),      # Absolute heading sin
+            np.cos(base_heading),      # Absolute heading cos
+            np.sin(heading_error),     # Relative heading error sin
+            np.cos(heading_error),     # Relative heading error cos
+        ], dtype=np.float32)
+        
+        return heading_obs
 
     def get_relative_ee_pos3d(self):
         """Get end-effector position relative to base in base frame."""
@@ -189,6 +228,9 @@ class ObservationManager:
         obs = {
             "base": {
                 "v_lin_2d": self.get_base_vel().astype(np.float32),
+                # [NEW 2025-01-04] Add base heading observation for Stage 1
+                # Provides explicit chassis orientation info: [sin_h, cos_h, sin_err, cos_err]
+                "heading": self.get_base_heading_obs(),
             },
             "arm": {
                 "ee_pos3d": self.get_relative_ee_pos3d().astype(np.float32),
@@ -223,6 +265,7 @@ class ObservationManager:
         if self.env.print_obs:
             print(f"##### Observation #####")
             print(f"base_vel: {obs['base']['v_lin_2d']}")
+            print(f"base_heading: {obs['base']['heading']}")
             print(f"ee_pos3d: {obs['arm']['ee_pos3d']}")
             print(f"ee_quat: {obs['arm']['ee_quat']}")
             print(f"ee_v_lin_3d: {obs['arm']['ee_v_lin_3d']}")
