@@ -624,16 +624,24 @@ class DcmmVecEnvStage1(gym.Env):
         [NEW 2025-01-04] Supports end-to-end Stage 1 → Stage 2 evaluation.
         Returns state dict suitable for initializing Stage 2 environment.
         
+        Usage Example:
+            # In evaluation loop:
+            if env_stage1.is_pregrasp_ready():
+                handoff_state = env_stage1.get_handoff_state()
+                # Reset Stage 2 env with handoff state
+                env_stage2.reset_from_handoff(handoff_state)
+                # Continue with Stage 2 policy
+        
         Returns:
-            dict: State information for Stage 2 initialization
-                - base_pos: Base position (x, y, z)
-                - base_quat: Base orientation quaternion
-                - arm_joints: Arm joint positions (6 DOF)
-                - ee_pos: End-effector position
-                - ee_quat: End-effector orientation
-                - object_pos: Object position
-                - object_quat: Object orientation
-                - ee_distance: Current EE-to-object distance
+            dict: State information for Stage 2 initialization containing:
+                - base_pos (np.ndarray): Base position [x, y, z] in world frame
+                - base_quat (np.ndarray): Base orientation quaternion [w, x, y, z]
+                - arm_joints (np.ndarray): Arm joint positions (6 DOF)
+                - ee_pos (np.ndarray): End-effector position in world frame
+                - ee_quat (np.ndarray): End-effector orientation quaternion
+                - object_pos (np.ndarray): Object position in world frame
+                - object_quat (np.ndarray): Object orientation quaternion
+                - ee_distance (float): Current EE-to-object distance in meters
         """
         return {
             'base_pos': self.Dcmm.data.body("base_link").xpos.copy(),

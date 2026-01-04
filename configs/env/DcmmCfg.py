@@ -302,18 +302,17 @@ class avp:
     enabled = False
 
     # ========================================
-    # Lambda Scheduling (Success-Rate Adaptive)
+    # Lambda Scheduling (Curriculum-Based)
     # ========================================
     # Legacy weights (now used as fallback bounds)
     lambda_weight_start = 0.8   # Not used directly anymore
     lambda_weight_end = 0.2     # Not used directly anymore
     
     # [NEW 2025-01-04] Adaptive lambda scheduling
+    # Note: Uses curriculum difficulty (step-based) as proxy for progress
     warmup_steps = 500000       # 0.5M steps: λ=0 (let progress reward dominate first)
-    lambda_max = 0.4            # Max λ during ramp-up phase
-    lambda_min = 0.1            # Min λ during decay phase
-    rampup_success_rate = 0.10  # Start ramp-up when success_rate > 10%
-    decay_success_rate = 0.60   # Start decay when success_rate > 60%
+    lambda_max = 0.4            # Max λ during mid-training phase
+    lambda_min = 0.1            # Min λ during late-training decay phase
     
     # ========================================
     # Distance Gate
@@ -330,6 +329,7 @@ class avp:
     # [NEW 2025-01-04] MC Dropout uncertainty gating
     mc_dropout_samples = 5       # Number of MC samples (K=5)
     uncertainty_alpha = 2.0      # exp(-α·σ) confidence scale
+    min_confidence = 0.3         # Minimum confidence threshold for gating
     
     # ========================================
     # Checkpoint and Network Config

@@ -123,8 +123,6 @@ class RewardManagerStage1:
         
         # [NEW 2025-01-04] Lambda scheduling parameters
         self.avp_warmup_steps = getattr(DcmmCfg.avp, 'warmup_steps', 500000)  # 0.5M steps
-        self.avp_rampup_success_rate = getattr(DcmmCfg.avp, 'rampup_success_rate', 0.10)  # 10%
-        self.avp_decay_success_rate = getattr(DcmmCfg.avp, 'decay_success_rate', 0.60)  # 60%
         self.avp_lambda_max = getattr(DcmmCfg.avp, 'lambda_max', 0.4)  # Max lambda during ramp-up
         self.avp_lambda_min = getattr(DcmmCfg.avp, 'lambda_min', 0.1)  # Min lambda during decay
         
@@ -132,6 +130,7 @@ class RewardManagerStage1:
         self.avp_depth_valid_threshold = getattr(DcmmCfg.avp, 'depth_valid_threshold', 0.6)  # 60%
         self.avp_mc_dropout_samples = getattr(DcmmCfg.avp, 'mc_dropout_samples', 5)  # K samples
         self.avp_uncertainty_alpha = getattr(DcmmCfg.avp, 'uncertainty_alpha', 2.0)  # exp(-α·σ)
+        self.avp_min_confidence = getattr(DcmmCfg.avp, 'min_confidence', 0.3)  # Min confidence threshold
 
         # Sanity checks to avoid silent AVP mismatch
         if hasattr(self.env, "img_size"):
@@ -953,8 +952,8 @@ class RewardManagerStage1:
             # ========================================
             current_potential, confidence = self._compute_potential_with_uncertainty(input_dict)
             
-            # Low confidence → gate out
-            if confidence < 0.3:  # Minimum confidence threshold
+            # Low confidence → gate out (threshold is configurable via avp.min_confidence)
+            if confidence < self.avp_min_confidence:
                 if self.avp_stats is not None:
                     self.avp_stats['uncertainty_gated_count'] += 1
                 # Still update prev_potential for next step
@@ -964,6 +963,10 @@ class RewardManagerStage1:
             # ========================================
             # 7. POTENTIAL-BASED SHAPING
             # r_avp = λ · (γ · Φ(s') - Φ(s))
+            # Note: We don't multiply by confidence here because:
+            # 1. We already gate on low confidence above
+            # 2. Weighting by confidence would diminish meaningful signals
+            #    even when the critic is reasonably accurate
             # ========================================
             if self.avp_prev_potential is None:
                 # First step of episode, no reward yet
@@ -973,8 +976,9 @@ class RewardManagerStage1:
             # Potential difference: positive if moving toward higher-value states
             potential_diff = self.avp_gamma * current_potential - self.avp_prev_potential
             
-            # Apply lambda and confidence weighting
-            avp_reward = self.avp_lambda * confidence * potential_diff
+            # Apply lambda scaling (standard potential-based shaping)
+            # Note: We don't multiply by confidence - already gated above
+            avp_reward = self.avp_lambda * potential_diff
             
             # Clip to prevent extreme values
             avp_reward = np.clip(avp_reward, -self.avp_reward_clip, self.avp_reward_clip)
@@ -1001,20 +1005,19 @@ class RewardManagerStage1:
     
     def _update_avp_lambda(self):
         """
-        Update AVP lambda based on success rate (adaptive scheduling).
+        Update AVP lambda based on curriculum difficulty (step-based scheduling).
         
-        [NEW 2025-01-04] Replaces linear curriculum-based lambda decay.
+        [NEW 2025-01-04] Three-phase lambda scheduling:
+        - Warm-up: λ=0 for first warmup_steps (handled in compute_avp_reward)
+        - Ramp-up: difficulty < 0.3 → λ ramps from 0 to lambda_max
+        - Full: 0.3 <= difficulty < 0.7 → λ = lambda_max
+        - Decay: difficulty >= 0.7 → λ decays to lambda_min
         
-        Schedule:
-        - Warm-up: λ=0 (handled in compute_avp_reward)
-        - Ramp-up: When success_rate > 10%, λ → lambda_max (0.4)
-        - Decay: When success_rate > 60%, λ → lambda_min (0.1)
-        
-        Note: Currently uses curriculum difficulty as a proxy for success rate.
-        Future improvement could integrate actual episode success rate from PPO.
+        Note: Uses curriculum_difficulty (step-based, 0-1) as the scheduling signal.
+        This provides smooth scheduling without complex success rate tracking.
         """
-        # Use curriculum difficulty as proxy for success rate
-        # This provides a smooth schedule without requiring success rate tracking
+        # Use curriculum difficulty as scheduling signal
+        # difficulty = global_step / max_steps (0.0 to 1.0)
         if hasattr(self.env, 'curriculum_difficulty'):
             difficulty = self.env.curriculum_difficulty
             # Early training (difficulty < 0.3): ramp up lambda
@@ -1053,7 +1056,8 @@ class RewardManagerStage1:
             
             return valid_pixels / total_pixels
             
-        except Exception:
+        except (AttributeError, RuntimeError) as e:
+            # Render manager not available or rendering failed
             return 1.0  # Default to valid if error
     
     def _compute_potential_with_uncertainty(self, input_dict):
@@ -1085,16 +1089,22 @@ class RewardManagerStage1:
         # MC Dropout: multiple forward passes with dropout enabled
         values = []
         
-        # Temporarily enable dropout for MC sampling
-        self.grasp_critic.train()  # Enable dropout
+        # Temporarily enable only dropout layers for MC sampling
+        # (avoid affecting BatchNorm running statistics)
+        dropout_modules = []
+        for m in self.grasp_critic.modules():
+            if isinstance(m, torch.nn.Dropout):
+                dropout_modules.append((m, m.training))
+                m.train(True)
         
         with torch.no_grad():
             for _ in range(self.avp_mc_dropout_samples):
                 res = self.grasp_critic.act(input_dict)
                 values.append(res['values'].item())
         
-        # Restore eval mode
-        self.grasp_critic.eval()
+        # Restore original mode for dropout layers
+        for m, was_training in dropout_modules:
+            m.train(was_training)
         
         # Compute mean and std
         values_np = np.array(values)

@@ -206,15 +206,20 @@ class RandomizationManager:
         
         if to_stem_dist > 0.1:
             to_stem_norm = to_stem / to_stem_dist
-            # Place fruit at target_distance from robot
+            # Place fruit at target_distance from robot along direction to stem
             fruit_x = robot_pos[0] + to_stem_norm[0] * target_distance
             fruit_y = robot_pos[1] + to_stem_norm[1] * target_distance
         else:
-            # Fallback: random offset
+            # Fallback: stem is effectively at robot position.
+            # Place fruit at target_distance from robot in a random horizontal direction,
+            # with small positional jitter.
+            angle = np.random.uniform(0.0, 2.0 * np.pi)
+            base_x = robot_pos[0] + np.cos(angle) * target_distance
+            base_y = robot_pos[1] + np.sin(angle) * target_distance
             offset_x = np.random.uniform(-0.05, 0.05)
             offset_y = np.random.uniform(-0.05, 0.05)
-            fruit_x = stem_pos[0] + offset_x
-            fruit_y = stem_pos[1] + offset_y
+            fruit_x = base_x + offset_x
+            fruit_y = base_y + offset_y
 
         self.env.object_pos3d = np.array([fruit_x, fruit_y, height])
         self.env.object_vel6d = np.zeros(6)

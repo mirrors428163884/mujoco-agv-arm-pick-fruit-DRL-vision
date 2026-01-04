@@ -185,7 +185,8 @@ class RewardManagerStage2:
             success_rate = self.env.get_recent_success_rate()
             if success_rate < success_threshold:
                 return False
-        except:
+        except (AttributeError, TypeError) as e:
+            # Method doesn't exist or returned invalid type - skip success check
             pass
         
         # Phase 2: 50% perturbation probability
