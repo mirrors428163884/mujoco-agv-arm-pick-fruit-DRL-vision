@@ -600,6 +600,9 @@ class RewardManagerStage1:
         reward = 0.0
         
         # Check milestones in order (furthest to closest)
+        # NOTE: If agent jumps from >1.0m to <0.2m in one step, they receive
+        # ALL milestone rewards since they effectively passed through all thresholds.
+        # This is intentional to provide proper credit for rapid progress.
         if not self.milestone_1m_reached and ee_dist < 1.0:
             self.milestone_1m_reached = True
             reward += DcmmCfg.reward_weights.get("r_milestone_1m", 5.0)
@@ -894,7 +897,8 @@ class RewardManagerStage1:
         if info["base_distance"] > gate_distance:
             return 0.0
         
-        base_pos = self.env.Dcmm.data.body("base_link").xpos[:2]
+        # [FIX 2025-01-04] Use 'arm_base' consistently with rest of codebase
+        base_pos = self.env.Dcmm.data.body("arm_base").xpos[:2]
         obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos[:2]
         
         # Target direction
@@ -902,7 +906,8 @@ class RewardManagerStage1:
         target_heading = np.arctan2(to_target[1], to_target[0])
         
         # Current base heading (yaw from quaternion)
-        base_quat = self.env.Dcmm.data.body("base_link").xquat
+        # [FIX 2025-01-04] Use 'arm_base' consistently with rest of codebase
+        base_quat = self.env.Dcmm.data.body("arm_base").xquat
         base_heading = quat_to_euler(base_quat)[2]  # yaw
         
         heading_error = np.abs(angle_diff(base_heading, target_heading))

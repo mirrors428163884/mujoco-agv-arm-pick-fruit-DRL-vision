@@ -434,7 +434,7 @@ class DcmmVecEnvStage1(gym.Env):
                                        self.Dcmm.data.body(self.Dcmm.object_name).xpos[0:3]),
             "base_distance": np.linalg.norm(self.Dcmm.data.body("arm_base").xpos[0:2] -
                                              self.Dcmm.data.body(self.Dcmm.object_name).xpos[0:2]),
-            "evn_time": self.Dcmm.data.time - self.start_time,
+            "env_time": self.Dcmm.data.time - self.start_time,  # [FIX] Corrected typo: evn_time -> env_time
         }
 
         # Get the observation and info
