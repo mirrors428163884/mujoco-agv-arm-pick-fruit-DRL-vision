@@ -58,5 +58,7 @@ ppo:
   max_agent_steps: 25000000
   test_num_episodes: 100
   max_test_steps: 10000
-  img_dim: [128, 128]
+  # [Fix] Unified to 84x84 to match AVP config and actual CNN architecture
+  # Note: DepthCNN in ModelsStage2.py is hardcoded for 84x84 input
+  img_dim: [84, 84]
   num_frames: 2

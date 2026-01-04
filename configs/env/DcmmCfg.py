@@ -15,7 +15,9 @@ XML_ARM_PATH = "urdf/xarm6_right.xml"
 WEIGHT_PATH = os.path.join(ASSET_PATH, "weights")
 
 ## The distance threshold to change the stage from 'tracking' to 'grasping'
-distance_thresh = 0.25
+## [Fix] Reduced from 0.25m to 0.10m for stricter tracking→grasping transition
+## 0.25m was too early, causing Stage2 to learn both approach + grasp simultaneously
+distance_thresh = 0.10
 
 ## Define the initial joint positions of the arm and the hand
 # Pre-grasp pose for maximum flexibility (Stage 2 optimized)
@@ -55,7 +57,7 @@ reward_weights = {
     },
     # [Fix 2025-12-20] Increased collision penalty to deter "kamikaze" behavior
     # Previous: -10, which was too weak (47 steps of dense rewards > 10 penalty)
-    "r_collision": -10.0,
+    "r_collision": -50.0,
     "r_finger_approach": 1.0,
     "r_force_closure": 5.0,
     "r_regularization": 0.05,
