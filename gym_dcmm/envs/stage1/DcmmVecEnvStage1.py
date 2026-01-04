@@ -614,7 +614,9 @@ class DcmmVecEnvStage1(gym.Env):
         if not (0.7 < info["base_distance"] < 0.9):
             return False
         
-        # Check orientation (cos > 0.966 ≈ 15°)
+        # Check orientation (alignment within 15°)
+        # ORIENTATION_THRESHOLD_COS = cos(15°) ≈ 0.966
+        ORIENTATION_THRESHOLD_COS = 0.966
         ee_pos = self.Dcmm.data.body("link6").xpos
         obj_pos = self.Dcmm.data.body(self.object_name).xpos
         ee_to_obj = obj_pos - ee_pos
@@ -622,7 +624,7 @@ class DcmmVecEnvStage1(gym.Env):
         ee_quat = self.Dcmm.data.body("link6").xquat
         palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
         cos_theta = np.dot(palm_forward, ee_to_obj_norm)
-        if cos_theta < 0.966:  # ~15 degrees
+        if cos_theta < ORIENTATION_THRESHOLD_COS:
             return False
         
         # Check EE velocity (should be low for stable handoff)

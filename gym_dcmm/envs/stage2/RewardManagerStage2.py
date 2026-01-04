@@ -407,7 +407,13 @@ class RewardManagerStage2:
     def _compute_ee_progress_reward(self, info):
         """
         Progress-based EE distance reward.
-        r_ee = k * (d_ee^{t-1} - d_ee^t), clipped to [-0.2, 0.2]
+        
+        Formula: r_ee = k * (d_ee_prev - d_ee_curr), clipped to [-0.2, 0.2]
+        
+        Where:
+        - d_ee_prev: EE-to-target distance at previous timestep
+        - d_ee_curr: EE-to-target distance at current timestep
+        - Positive reward when getting closer (d_ee_prev > d_ee_curr)
         """
         current_dist = info["ee_distance"]
         
@@ -432,9 +438,10 @@ class RewardManagerStage2:
         Args:
             touch_sensors: Array of 4 touch values [thumb, index, middle, ring]
         """
-        f_min = 0.1    # Minimum force for "effective contact"
-        f_low = 0.2    # Lower bound of optimal range
-        f_high = 1.5   # Upper bound of optimal range
+        # Force thresholds (in Newtons, typical for finger contact sensors)
+        f_min = 0.1    # Minimum force for "effective contact" (N)
+        f_low = 0.2    # Lower bound of optimal range (N)
+        f_high = 1.5   # Upper bound of optimal range (N)
         f_mid = (f_low + f_high) / 2
         f_band = (f_high - f_low) / 2
         

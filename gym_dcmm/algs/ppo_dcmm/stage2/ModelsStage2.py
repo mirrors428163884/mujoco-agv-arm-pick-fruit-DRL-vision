@@ -127,7 +127,11 @@ class ActorCritic(nn.Module):
             nn.init.orthogonal_(self.arm_head.weight, gain=0.01)
             nn.init.orthogonal_(self.hand_head.weight, gain=0.01)
             
-            # Separate log_std: arm smaller (stable), hand larger (exploration)
+            # Separate log_std for arm and hand:
+            # - Arm: -2.5 -> exp(-2.5) ≈ 0.082 std, smaller for more stable/precise arm control
+            #        Arm movements should be smoother and more controlled during grasping
+            # - Hand: -1.5 -> exp(-1.5) ≈ 0.223 std, larger for more exploration in finger control
+            #         Fingers need more exploration to discover good grasp configurations
             self.sigma_arm = nn.Parameter(
                 torch.full((self.arm_action_dim,), -2.5, dtype=torch.float32), requires_grad=True)
             self.sigma_hand = nn.Parameter(

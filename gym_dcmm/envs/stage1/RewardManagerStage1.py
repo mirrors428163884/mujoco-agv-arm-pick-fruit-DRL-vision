@@ -11,8 +11,8 @@ three-stage reward structure to eliminate reward hacking and "站桩刷分" beha
 
 NEW Reward Structure:
 1. Progress-based Rewards (replace absolute distance rewards):
-   - EE Progress: k_ee * (d_ee^{t-1} - d_ee^t), clipped to [-0.2, 0.2]
-   - Base Progress: k_base * (d_base^{t-1} - d_base^t), clipped to [-0.2, 0.2]
+   - EE Progress: k_ee * (d_ee_prev - d_ee_curr), clipped to [-0.2, 0.2]
+   - Base Progress: k_base * (d_base_prev - d_base_curr), clipped to [-0.2, 0.2]
    
 2. Regularization Penalties:
    - Alive Penalty: -0.01 per step to prevent stalling
@@ -43,6 +43,9 @@ from gym_dcmm.utils.quat_utils import quat_rotate_vector, quat_to_euler, angle_d
 # AVP Imports (only used when AVP is enabled)
 from gym_dcmm.algs.ppo_dcmm.stage2.ModelsStage2 import ActorCritic as CriticStage2
 from gym_dcmm.algs.ppo_dcmm.utils import RunningMeanStd
+
+# Constants for success criteria
+ORIENTATION_THRESHOLD_COS = 0.966  # cos(15°) - orientation alignment threshold
 
 
 class RewardManagerStage1:
@@ -297,7 +300,12 @@ class RewardManagerStage1:
         """
         Compute EE progress reward: reward for getting closer to target.
         
-        r_ee = k_ee * (d_ee^{t-1} - d_ee^t), clipped to [-0.2, 0.2]
+        Formula: r_ee = k_ee * (d_ee_prev - d_ee_curr), clipped to [-0.2, 0.2]
+        
+        Where:
+        - d_ee_prev: EE-to-target distance at previous timestep
+        - d_ee_curr: EE-to-target distance at current timestep
+        - Positive reward when getting closer (d_ee_prev > d_ee_curr)
         
         This replaces absolute distance rewards with progress-based rewards
         to prevent "站桩刷分" (standing still to farm rewards).
@@ -465,7 +473,7 @@ class RewardManagerStage1:
         if not (0.7 < info["base_distance"] < 0.9):
             return 0.0
         
-        # Check orientation (cos > 0.966 ≈ 15°)
+        # Check orientation (alignment within 15°)
         ee_pos = self.env.Dcmm.data.body("link6").xpos
         obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos
         ee_to_obj = obj_pos - ee_pos
@@ -473,7 +481,7 @@ class RewardManagerStage1:
         ee_quat = self.env.Dcmm.data.body("link6").xquat
         palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
         cos_theta = np.dot(palm_forward, ee_to_obj_norm)
-        if cos_theta < 0.966:  # ~15 degrees
+        if cos_theta < ORIENTATION_THRESHOLD_COS:
             return 0.0
         
         # Check EE velocity (should be low)
