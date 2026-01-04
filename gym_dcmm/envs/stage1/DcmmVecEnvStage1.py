@@ -418,6 +418,9 @@ class DcmmVecEnvStage1(gym.Env):
         
         # Reset observation noise state for domain randomization
         self.obs_manager.reset_noise_state()
+        
+        # [NEW 2025-01-04] Reset progress tracking for new episode
+        self.reward_manager.reset_progress_tracking()
 
         self.info = {
             "ee_distance": np.linalg.norm(self.Dcmm.data.body("link6").xpos -
@@ -548,26 +551,31 @@ class DcmmVecEnvStage1(gym.Env):
                 else:
                     truncated = False
             elif self.task == "Tracking":
-                # [Fix 2025-12-20] Success condition aligned with Stage 2 handoff:
-                # - Palm must touch target (step_touch)
-                # - EE must be within distance_thresh (0.25m) to ensure good starting position for Stage 2
-                # - Contact must be sustained for 10 steps
-                info['is_success'] = False  # Default to failure
-                ee_close_enough = info["ee_distance"] < DcmmCfg.distance_thresh
+                # [REFACTORED 2025-01-04] Pre-grasp pose success criteria
+                # Success is based on POSE, NOT contact - this prevents hard collision incentive
+                # Pre-grasp conditions (with hysteresis):
+                # - d_ee < 0.05m
+                # - angle_err < 15° (cos > 0.966)
+                # - |v_ee| < 0.05 m/s  
+                # - 0.7m < d_base < 0.9m
+                # - Must maintain for 5-10 consecutive steps (hysteresis)
                 
-                if self.step_touch and ee_close_enough:
+                info['is_success'] = False  # Default to failure
+                truncated = False
+                
+                # Check pre-grasp pose conditions
+                pregrasp_achieved = self._check_pregrasp_pose(info)
+                
+                if pregrasp_achieved:
                     self.contact_count += 1
-                    if self.contact_count >= 10:
+                    if self.contact_count >= 5:  # Hysteresis: 5 consecutive steps
                         truncated = True
                         info['is_success'] = True  # Mark as success for Stage 2 handoff
                         if self.print_info:
-                            print(f"SUCCESS: Stage 1 Tracking complete! EE distance: {info['ee_distance']:.3f}m")
-                    else:
-                        truncated = False
+                            print(f"SUCCESS: Stage 1 Pre-grasp achieved! EE distance: {info['ee_distance']:.3f}m")
                 else:
-                    # Lost contact or moved too far, reset counter
-                    self.contact_count = 0
-                    truncated = False
+                    # Lost pre-grasp pose, reset counter (but don't immediately fail)
+                    self.contact_count = max(0, self.contact_count - 1)
                 
                 # Time limit truncation (failure)
                 if info["env_time"] > self.env_time and not truncated:
@@ -582,6 +590,49 @@ class DcmmVecEnvStage1(gym.Env):
             import traceback
             traceback.print_exc()
             raise e
+    
+    def _check_pregrasp_pose(self, info):
+        """
+        Check if robot has achieved pre-grasp pose suitable for Stage 2 handoff.
+        
+        [NEW 2025-01-04] Pre-grasp pose criteria (does NOT require contact):
+        - d_ee < 0.05m
+        - angle_err < 15° (cos > 0.966)
+        - |v_ee| < 0.05 m/s
+        - 0.7m < d_base < 0.9m
+        
+        Returns:
+            bool: True if pre-grasp pose achieved
+        """
+        from gym_dcmm.utils.quat_utils import quat_rotate_vector
+        
+        # Check EE distance
+        if info["ee_distance"] >= 0.05:
+            return False
+        
+        # Check base distance (should be in optimal window)
+        if not (0.7 < info["base_distance"] < 0.9):
+            return False
+        
+        # Check orientation (cos > 0.966 ≈ 15°)
+        ee_pos = self.Dcmm.data.body("link6").xpos
+        obj_pos = self.Dcmm.data.body(self.object_name).xpos
+        ee_to_obj = obj_pos - ee_pos
+        ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-6)
+        ee_quat = self.Dcmm.data.body("link6").xquat
+        palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
+        cos_theta = np.dot(palm_forward, ee_to_obj_norm)
+        if cos_theta < 0.966:  # ~15 degrees
+            return False
+        
+        # Check EE velocity (should be low for stable handoff)
+        ee_vel = self.Dcmm.data.body("link6").cvel[3:6]
+        ee_speed = np.linalg.norm(ee_vel)
+        if ee_speed >= 0.05:
+            return False
+        
+        # All conditions met!
+        return True
 
     def close(self):
         """Close the environment and cleanup resources."""

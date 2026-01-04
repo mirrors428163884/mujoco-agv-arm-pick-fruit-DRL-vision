@@ -35,11 +35,65 @@ hand_joints = np.array([
 ])
 
 ## Define the reward weights
-## [Fix 2025-12-20] Rebalanced rewards to prevent "kamikaze" reward hacking:
-## - Increased collision penalty from -10 to -50 to deter crash behavior
-## - Added success bonus (r_success=50) to make task completion more attractive
-## - Reduced dense reward weights to prevent reward accumulation without task completion
+## [REFACTORED 2025-01-04] New "Progress + Terminal + Regularization" structure
+## Based on issue requirements to eliminate reward hacking and "站桩刷分" behavior
 reward_weights = {
+    # ========================================
+    # Stage 1: Progress-Based Rewards (NEW)
+    # ========================================
+    "r_ee_progress": 3.0,           # EE progress toward target (recommended: 2.0-5.0)
+    "r_base_progress": 2.0,         # Base progress toward optimal distance (recommended: 1.0-3.0)
+    
+    # ========================================
+    # Stage 1: Regularization Penalties (NEW)
+    # ========================================
+    "r_alive_penalty": -0.01,       # Per-step time penalty (recommended: -0.01 to -0.02)
+    "r_stagnation_penalty": -0.1,   # Penalty when stuck for N steps
+    
+    # ========================================
+    # Stage 1: Conditional Rewards (NEW)
+    # ========================================
+    "r_orientation_gate": 0.30,     # Only apply orientation reward when d_ee < this (meters)
+    "r_orientation_v2": 0.4,        # Cosine-based orientation reward (recommended: 0.2-0.6)
+    
+    # ========================================
+    # Stage 1: Terminal Rewards (UPDATED)
+    # ========================================
+    "r_pregrasp_success": 50.0,     # Pre-grasp pose achieved (recommended: 30-80)
+    "r_collision": -50.0,           # Collision penalty (recommended: -30 to -80)
+    "r_timeout": -20.0,             # Timeout penalty (recommended: -10 to -30)
+    
+    # ========================================
+    # Stage 2: Progress-Based Rewards (NEW)
+    # ========================================
+    "r_stage2_ee_progress": 3.0,    # EE progress reward
+    "r_stage2_alive": -0.01,        # Per-step time penalty
+    
+    # ========================================
+    # Stage 2: Grasp Quality Rewards (NEW)
+    # ========================================
+    "r_grasp_count": 1.5,           # Multi-finger count reward weight
+    "r_grasp_force_range": 1.0,     # Force in optimal range reward
+    "r_grasp_balance": 0.5,         # Force balance (variance penalty) weight
+    
+    # ========================================
+    # Stage 2: Slip/Impact Penalties (NEW)
+    # ========================================
+    "r_slip_penalty": 1.0,          # Slip penalty weight (recommended: 0.5-2.0)
+    "r_impact_vel_threshold": 0.3,  # Velocity threshold for impact penalty
+    "r_impact_first_contact": -5.0, # One-time penalty for high-speed first contact
+    "r_impact_continuous": 2.0,     # Continuous impact penalty weight
+    
+    # ========================================
+    # Stage 2: Terminal Rewards (NEW - Large Gap)
+    # ========================================
+    "r_stage2_success": 100.0,      # Success bonus (recommended: 50-150)
+    "r_stage2_failure": -50.0,      # Failure penalty (recommended: -30 to -80)
+    "r_stage2_collision": -50.0,    # Collision penalty
+    
+    # ========================================
+    # Legacy Reward Weights (kept for backward compatibility)
+    # ========================================
     "r_base_pos": 0.0,
     "r_ee_pos": 1.0,
     "r_precision": 10.0,
@@ -55,28 +109,23 @@ reward_weights = {
         'arm': 1.0,
         'hand': 0.2,
     },
-    # [Fix 2025-12-20] Increased collision penalty to deter "kamikaze" behavior
-    # Previous: -10, which was too weak (47 steps of dense rewards > 10 penalty)
-    "r_collision": -50.0,
     "r_finger_approach": 1.0,
     "r_force_closure": 5.0,
     "r_regularization": 0.05,
-    # [NEW 2025-12-19] Arm-specific reward weights for Stage 1 tracking
-    # [Fix 2025-12-20] Reduced arm_reaching weight from 2.0 to 1.0 to reduce reward hacking
-    "r_arm_reaching": 1.0,      # Weight for arm reaching reward (base frame)
-    "r_global_reaching": 0.3,   # Weight for global reaching reward (reduced from 0.5)
-    "r_arm_motion": 0.3,        # Weight for arm joint deviation (reduced from 0.5)
-    "r_arm_action": 0.1,        # Weight for arm action magnitude (reduced from 0.2)
-    "r_base_ctrl_scale": 0.005, # Base control penalty scale
-    "r_arm_ctrl_scale": 0.001,  # Arm control penalty scale (lower to encourage use)
-    "r_action_rate": 0.02,      # Action rate penalty scale
-    # [NEW 2025-12-20] Success bonus for completing the task
-    # This makes task completion much more attractive than accumulating dense rewards
-    "r_success": 50.0,          # Bonus for successful task completion (10 steps of contact)
-    # [NEW 2025-12-20] Additional reward weights from completeness analysis
-    "r_joint_limit": -2.0,      # Penalty weight for approaching joint limits (safety)
-    "r_base_heading": 0.5,      # Reward for base facing toward target
-    "r_contact_persistence": 2.0,  # Reward for sustained contact (0-2.0)
+    # [DEPRECATED] Old arm-specific rewards - removed to prevent reward hacking
+    "r_arm_reaching": 1.0,          # Reduced, prefer progress-based
+    "r_global_reaching": 0.3,       # Reduced
+    "r_arm_motion": 0.0,            # DISABLED - conflicts with smoothness
+    "r_arm_action": 0.0,            # DISABLED - conflicts with smoothness
+    "r_base_ctrl_scale": 0.005,
+    "r_arm_ctrl_scale": 0.001,
+    "r_action_rate": 0.02,
+    # [KEPT] Success bonus still useful but secondary to pregrasp_success
+    "r_success": 50.0,
+    # Joint and heading rewards
+    "r_joint_limit": -2.0,
+    "r_base_heading": 0.5,
+    "r_contact_persistence": 2.0,
 }
 
 ## Define the camera params for the MujocoRenderer.
