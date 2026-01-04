@@ -122,6 +122,7 @@ class PPO_Stage2(object):
         self.storage = ExperienceBuffer(
             self.num_actors, self.horizon_length, self.batch_size, self.minibatch_size,
             self.obs_shape[0], self.actions_num, self.device,
+            use_gru=False,  # Stage2 doesn't use GRU, explicitly disable to avoid unpacking mismatch
         )
 
         batch_size = self.num_actors
