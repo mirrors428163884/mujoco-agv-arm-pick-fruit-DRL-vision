@@ -120,11 +120,10 @@ class ActorCritic(nn.Module):
         if self.use_vision:
             self.cnn = CNNBase(img_input_shape, hidden_size=256)
             combined_input_size = mlp_input_shape + 256
-            
-            # [NEW 2025-01-04] Small visual embedding for Actor (64D)
-            # This allows Actor to "see" obstacles without full visual input
-            self.vis_actor_proj = nn.Linear(256, 64)
-            actor_input_size = mlp_input_shape + 64
+            # Actor currently does not consume visual features; keep its input
+            # size equal to the vector MLP input size to avoid dead code and
+            # inconsistent dimension accounting.
+            actor_input_size = mlp_input_shape
         else:
             self.cnn = None
             combined_input_size = mlp_input_shape
