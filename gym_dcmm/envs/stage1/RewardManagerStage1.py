@@ -987,9 +987,13 @@ class RewardManagerStage1:
             return 0.0
         
         # ========================================
-        # 2. UPDATE LAMBDA (success-rate adaptive)
+        # 2. UPDATE LAMBDA (cosine or piecewise linear)
+        # [UPDATED 2025-01-04] Use cosine schedule for smoother transitions
         # ========================================
-        self._update_avp_lambda()
+        if getattr(DcmmCfg.avp, 'use_cosine_schedule', False):
+            self._update_avp_lambda_cosine()
+        else:
+            self._update_avp_lambda()
         
         # ========================================
         # 3. DISTANCE GATING
@@ -1097,6 +1101,42 @@ class RewardManagerStage1:
             else:
                 decay_progress = (difficulty - 0.7) / 0.3
                 self.avp_lambda = self.avp_lambda_max - (self.avp_lambda_max - self.avp_lambda_min) * decay_progress
+    
+    def _update_avp_lambda_cosine(self):
+        """
+        Update AVP lambda using smooth cosine scheduling.
+        
+        [NEW 2025-01-04] Cosine scheduling provides smoother transitions than
+        piecewise linear, preventing sudden λ changes that cause policy oscillation.
+        
+        Schedule:
+        - Warm-up (difficulty < rampup_end): Cosine ramp from 0 to lambda_max
+        - Full (rampup_end <= difficulty < decay_start): lambda_max
+        - Decay (difficulty >= decay_start): Cosine decay to lambda_min
+        """
+        if not hasattr(self.env, 'curriculum_difficulty'):
+            return
+        
+        difficulty = self.env.curriculum_difficulty
+        
+        # Get cosine schedule parameters
+        rampup_end = getattr(DcmmCfg.avp, 'cosine_rampup_end', 0.3)
+        decay_start = getattr(DcmmCfg.avp, 'cosine_decay_start', 0.7)
+        
+        if difficulty < rampup_end:
+            # Cosine ramp-up: 0 -> lambda_max
+            # Uses (1 - cos(x * π)) / 2 for smooth start (derivative=0 at 0)
+            progress = difficulty / rampup_end
+            self.avp_lambda = self.avp_lambda_max * (1 - np.cos(progress * np.pi)) / 2
+        elif difficulty < decay_start:
+            # Full lambda
+            self.avp_lambda = self.avp_lambda_max
+        else:
+            # Cosine decay: lambda_max -> lambda_min
+            # Uses (1 + cos(x * π)) / 2 for smooth end (derivative=0 at 1)
+            progress = (difficulty - decay_start) / (1.0 - decay_start)
+            decay_range = self.avp_lambda_max - self.avp_lambda_min
+            self.avp_lambda = self.avp_lambda_min + decay_range * (1 + np.cos(progress * np.pi)) / 2
     
     def _compute_depth_valid_ratio(self):
         """

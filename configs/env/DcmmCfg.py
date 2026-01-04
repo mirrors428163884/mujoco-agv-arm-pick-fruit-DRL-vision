@@ -326,22 +326,31 @@ class avp:
 
     # ========================================
     # Lambda Scheduling (Curriculum-Based)
+    # [UPDATED 2025-01-04] Changed to smooth cosine scheduling
     # ========================================
     # Legacy weights (now used as fallback bounds)
     lambda_weight_start = 0.8   # Not used directly anymore
     lambda_weight_end = 0.2     # Not used directly anymore
     
-    # [NEW 2025-01-04] Adaptive lambda scheduling
+    # [NEW 2025-01-04] Adaptive lambda scheduling with cosine transition
     # Note: Uses curriculum difficulty (step-based) as proxy for progress
     warmup_steps = 500000       # 0.5M steps: λ=0 (let progress reward dominate first)
     lambda_max = 0.4            # Max λ during mid-training phase
     lambda_min = 0.1            # Min λ during late-training decay phase
     
+    # [NEW 2025-01-04] Smooth cosine scheduling parameters
+    # If True, uses cosine instead of piecewise linear for smoother transitions
+    use_cosine_schedule = True
+    cosine_rampup_end = 0.3     # difficulty threshold for ramp-up completion
+    cosine_decay_start = 0.7    # difficulty threshold for decay start
+    
     # ========================================
     # Distance Gate
+    # [UPDATED 2025-01-04] Relaxed from 1.5m to 2.0m based on issue feedback
+    # If avp/distance_gate_ratio > 95%, the gate is too strict
     # ========================================
     # Only compute AVP when EE is closer than this (meters)
-    gate_distance = 1.5
+    gate_distance = 2.0  # Relaxed from 1.5m to 2.0m
     
     # ========================================
     # OOD/Confidence Gating
@@ -459,6 +468,7 @@ class obj_pos_noise:
 
 
 ## GRU (Recurrent Neural Network) Configuration for memory
+## [UPDATED 2025-01-04] Added stage-specific controls and conditional disabling
 class gru_config:
     # Master switch for RNN
     enabled = True
@@ -468,3 +478,30 @@ class gru_config:
     
     # Number of GRU layers
     num_layers = 1
+    
+    # [NEW 2025-01-04] Stage-specific GRU control
+    # GRU adds training instability when frame drop rate is low
+    # Consider disabling for Stage 1 if YOLO drop simulation is minimal
+    stage1_enabled = True     # Set to False to disable GRU in Stage 1
+    stage2_enabled = True     # Stage 2 usually benefits from GRU
+    
+    # [NEW 2025-01-04] Conditional disabling based on frame drop rate
+    # If frame drop probability < threshold, automatically disable GRU
+    auto_disable_threshold = 0.05  # Disable GRU if drop_probability < 5%
+
+
+## Network Architecture Configuration
+## [NEW 2025-01-04] Configurable network capacity
+class network_config:
+    # Actor/Critic MLP hidden layer sizes
+    # Default: [256, 128] - original configuration
+    # Larger: [512, 256] - increased capacity for complex tasks
+    mlp_units = [256, 128]
+    
+    # [NEW 2025-01-04] Option for increased capacity
+    # Set to True to use [512, 256] for both Actor and Critic
+    use_large_network = False
+    large_mlp_units = [512, 256]
+    
+    # Separate value MLP (Critic uses separate network from Actor)
+    separate_value_mlp = True
