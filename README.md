@@ -12,19 +12,22 @@
 
 | 特性 | 描述 |
 |------|------|
-| **两阶段训练** | Stage 1 训练底盘+机械臂接近目标，Stage 2 训练灵巧手抓取 |
-| **AVP技术** | Asymmetric Value Propagation，使用 Stage 2 Critic 为 Stage 1 提供"可抓取性"奖励信号 |
-| **动态课程学习** | 0→2M步渐进式调整碰撞惩罚（-0.1→-2.0）和朝向精度要求（1.0→1.5次方） |
+| **两阶段训练** | Stage 1 训练底盘+机械臂接近目标（预抓取姿态），Stage 2 训练灵巧手抓取 |
+| **AVP技术** | Asymmetric Value Propagation，使用 Stage 2 Critic 为 Stage 1 提供"可抓取性"奖励信号（支持势能整形、OOD检测） |
+| **Progress-Based奖励** | 2025-01-04重构：基于进度的奖励替代绝对距离奖励，消除"站桩刷分"行为 |
+| **三阶段课程学习** | Stage 2 采用三阶段课程（基础抓取→滑移惩罚→扰动测试），渐进提升难度 |
+| **GRU记忆模块** | Stage 1 支持可选的GRU网络，处理物体位置观测的帧丢失问题 |
 | **关节空间控制** | 直接输出关节角度增量（Δθ），避免IK不稳定性 |
-| **域随机化** | 深度噪声、光照随机、地面纹理、物体形状/质量随机化 |
-| **视觉感知** | 84×84深度图输入，支持模拟RealSense D435i噪声 |
+| **分离输出头** | Actor网络为底盘/手臂（Stage 1）和手臂/手部（Stage 2）使用分离输出头 |
+| **域随机化** | 深度噪声、光照随机、地面纹理、物体形状/质量、YOLO检测帧丢失模拟 |
+| **视觉感知** | 84×84深度图输入，支持模拟RealSense D435i噪声（Cutout、椒盐、边缘模糊） |
 
 ### 🤖 机器人平台
 
 - **移动底盘**: Ranger Mini V2 双阿克曼转向底盘
 - **机械臂**: xArm6 6自由度机械臂
 - **灵巧手**: LEAP Hand 16关节灵巧手（12个可控自由度）
-- **传感器**: 腕部深度相机、手指触觉传感器（4个）
+- **传感器**: 腕部深度相机、手指触觉传感器（4个：拇指、食指、中指、无名指）
 
 ---
 
@@ -44,7 +47,7 @@
 git clone https://github.com/hwzhanng/Picking_Sorting.git
 cd Picking_Sorting
 
-#安装图形加速库
+# 安装图形加速库
 sudo apt-get update
 sudo apt-get install -y libegl1-mesa-dev libgl1-mesa-dev libosmesa6-dev libglew-dev
 
@@ -54,7 +57,7 @@ conda activate dcmm
 
 # 3. 安装PyTorch (根据GPU/驱动选择CUDA版本)
 #   示例使用 cu121（驱动>=535）；如需新版可替换为 cu124，更多组合见 https://pytorch.org/get-started/locally/
-pip install " torch >=2.4.0" " torchvision >=0.20.0" " torchaudio >=2.4.0" --index-url https://download.pytorch.org/whl/cu121
+pip install "torch>=2.4.0" "torchvision>=0.20.0" "torchaudio>=2.4.0" --index-url https://download.pytorch.org/whl/cu121
 
 # 4. 安装项目依赖（版本未钉死，可随CUDA/驱动灵活选择）
 pip install -r requirements.txt
@@ -81,13 +84,18 @@ python train_stage1.py test=True num_envs=1 viewer=True
 
 | 类型 | 维度 | 组成 |
 |------|------|------|
-| **观测 (State)** | 15 | 底盘速度(2) + 末端位置(3) + 末端四元数(4) + 末端速度(3) + 目标位置(3) |
-| **观测 (Depth)** | 84×84 | 深度图像，单通道，归一化至0-255 |
+| **观测 (State)** | 15-16 | 底盘速度(2) + 末端位置(3) + 末端四元数(4) + 末端速度(3) + 目标位置(3) + [可选: 位置有效标志(1)] |
+| **观测 (Depth)** | 84×84 | 深度图像，单通道，归一化至0-255，支持域随机化噪声 |
 | **动作** | 8 | 底盘速度(2) + 机械臂关节增量(6) |
 
 **动作范围:**
 - 底盘: [-4, 4] m/s (线速度)
 - 机械臂: [-0.05, 0.05] rad/step (关节增量)
+
+**新增特性 (2025-01-04):**
+- 物体位置观测支持帧丢失模拟（模拟YOLO检测失败）
+- 可选的`is_valid`标志帮助网络区分有效/无效观测
+- GRU记忆模块支持处理观测序列
 
 ### Stage 2 (Catching - 灵巧手抓取)
 
@@ -95,12 +103,16 @@ python train_stage1.py test=True num_envs=1 viewer=True
 |------|------|------|
 | **观测 (State)** | 35 | 末端位置(3) + 末端四元数(4) + 末端速度(3) + 机械臂关节(6) + 目标位置(3) + 手部关节(12) + 触觉(4) |
 | **观测 (Depth)** | 84×84 | 深度图像，单通道，归一化至0-255 |
-| **动作** | 20 | 底盘(2, 锁定为0) + 机械臂关节增量(6) + 手部关节增量(12) |
+| **动作** | 18/20 | [底盘(2, 锁定为0)] + 机械臂关节增量(6) + 手部关节增量(12) |
 
 **动作范围:**
 - 底盘: 锁定为0 (Stage 2不控制底盘)
 - 机械臂: [-0.025, 0.025] rad/step (关节增量)
 - 手部: [-0.05, 0.05] rad/step (关节增量)
+
+**网络架构特性:**
+- 分离输出头：手臂(6D)和手部(12D)使用独立输出层
+- 分离log_std：手臂σ=-2.5(更稳定)，手部σ=-1.5(更多探索)
 
 ---
 
@@ -108,34 +120,56 @@ python train_stage1.py test=True num_envs=1 viewer=True
 
 ### Stage 1 奖励函数 (`RewardManagerStage1.py`)
 
-| 奖励分量 | 公式 | 权重 | 说明 |
-|----------|------|------|------|
-| **手臂到达** | `2.0 × (1 - tanh(3d_arm))` | 2.0 | 机械臂末端到目标距离（基座坐标系） |
-| **全局到达** | `0.5 × (1 - tanh(2d_ee))` | 0.5 | 末端到目标全局距离 |
-| **底盘定位** | `exp(-5(d_base - 0.8)²)` | 1.0 | 鼓励底盘保持0.8m最优距离 |
-| **手臂运动** | `0.5 × tanh(3 × joint_dev)` | 0.5 | 奖励手臂关节偏离初始位置 |
-| **手臂动作** | `0.2 × ‖action_arm‖` | 0.2 | 奖励使用手臂控制 |
-| **朝向对齐** | `max(0, align)^power × 2` | 动态 | 掌心朝向目标（power: 1.0→1.5） |
-| **接触奖励** | `10 - 4 × impact_speed` | 10.0 | 轻触目标，惩罚高速撞击 |
-| **树干碰撞** | `curriculum_penalty` | -0.1→-2.0 | 课程学习渐进惩罚 |
-| **树叶碰撞** | `-0.5 × (1 + velocity)` | -0.5 | 速度相关轻微惩罚 |
-| **动作平滑** | `-0.02 × ‖Δaction‖` | -0.02 | 惩罚动作剧烈变化 |
-| **控制正则** | `-0.005 × ‖base‖ - 0.001 × ‖arm‖` | 动态 | 底盘惩罚大于手臂 |
-| **AVP奖励** | `λ × Critic(virtual_obs)` | 0.2→0.8 | Stage 2 Critic值估计 |
+**[2025-01-04 重大重构]** 采用 "Progress + Terminal + Regularization" 三阶段奖励结构，消除奖励作弊和"站桩刷分"行为。
+
+#### 新奖励结构
+
+| 类别 | 奖励分量 | 公式 | 权重 | 说明 |
+|------|----------|------|------|------|
+| **Progress** | EE进度奖励 | `k_ee × (d_prev - d_curr)`, clip到±0.2 | 3.0 | 接近目标时获得正奖励 |
+| **Progress** | 底盘进度奖励 | `k_base × (err_prev - err_curr)`, clip到±0.2 | 2.0 | 接近最优距离(0.8m)时获得正奖励 |
+| **Regularization** | 存活惩罚 | `-0.01 per step` | -0.01 | 防止原地不动 |
+| **Regularization** | 停滞惩罚 | `-0.1 if stagnating N steps` | -0.1 | EE距离N步无进展时惩罚 |
+| **Conditional** | 朝向奖励 | `k_ori × max(0, cos(θ))`, 仅d_ee<0.3m时激活 | 0.4 | 基于余弦的朝向奖励 |
+| **Terminal** | 预抓取成功 | `+50` | 50.0 | **不需要接触**，基于姿态判定成功 |
+| **Terminal** | 碰撞惩罚 | `-50` | -50.0 | 严重碰撞 |
+| **Terminal** | 超时惩罚 | `-20` | -20.0 | Episode超时 |
+| **Optional** | AVP奖励 | `λ × (γ·Φ(s') - Φ(s))`, clip到±0.2 | 自适应 | 势能整形AVP |
+
+#### 预抓取成功条件（不需要接触）
+- d_ee < 0.05m
+- 角度误差 < 15° (cos > 0.966)
+- |v_ee| < 0.05 m/s
+- 0.7m < d_base < 0.9m
+- 连续保持5步（滞后稳定）
 
 ### Stage 2 奖励函数 (`RewardManagerStage2.py`)
 
-| 奖励分量 | 公式 | 权重 | 说明 |
-|----------|------|------|------|
-| **到达奖励** | `2.0 × exp(-2d_ee)` | 2.0 | 末端到目标指数衰减 |
-| **距离里程碑** | `+0.5/+1.0/+1.5/+2.0` | 累加 | d<0.3m/0.15m/0.08m/0.05m |
-| **朝向奖励** | `max(0, align) × 1.0` | 1.0 | 仅d<0.5m时计算 |
-| **抓取奖励** | `1.0 + 0.5×fingers + bonus` | 动态 | 接触数量+力范围bonus |
-| **扰动测试** | `±10.0 / -5.0` | ±10.0 | 抵抗0.5-1.5N随机扰动 |
-| **冲击惩罚** | `-min(2(v-0.3), 3)` | -3.0 | v>0.3m/s时惩罚 |
-| **成功奖励** | `+20.0` | 20.0 | 稳定抓取1秒 |
-| **碰撞惩罚** | `-2.0` | -2.0 | 非成功终止 |
-| **植物碰撞** | `curriculum_penalty` | 动态 | 茎秆>叶片 |
+**[2025-01-04 重大重构]** 采用三阶段课程学习，强调"多指稳定抓取 + 低冲击 + 扰动抵抗"。
+
+#### 新奖励结构
+
+| 类别 | 奖励分量 | 公式 | 权重 | 说明 |
+|------|----------|------|------|------|
+| **Progress** | EE进度奖励 | `k × (d_prev - d_curr)`, clip到±0.2 | 3.0 | 基于进度的距离奖励 |
+| **Progress** | 里程碑奖励 | `+2.0 if d_ee < 0.05m` | 2.0 | 仅保留一个关键里程碑 |
+| **Grasp Quality** | 多指计数 | `k_cnt × (n_contact / 4)` | 1.5 | 鼓励更多手指接触 |
+| **Grasp Quality** | 力范围奖励 | 力在[f_low, f_high]范围内得分 | 1.0 | 鼓励适当抓取力 |
+| **Grasp Quality** | 力平衡奖励 | `-k_bal × variance(forces)` | 0.5 | 惩罚力分布不均 |
+| **Grasp Quality** | 手指协同 | 拇指+其他对握奖励 | 1.0 | 鼓励对握姿态 |
+| **Penalty** | 滑移惩罚 | `-k_s × |v_rel|` | 课程自适应 | 惩罚物体-手相对速度 |
+| **Penalty** | 冲击惩罚 | `-penalty if v_ee > 0.3 at first contact` | -5.0 | 惩罚高速首次接触 |
+| **Terminal** | 成功奖励 | `+100` | 100.0 | 稳定抓取1秒 |
+| **Terminal** | 失败惩罚 | `-50` | -50.0 | 成功/失败差距大 |
+| **Perturbation** | 扰动测试 | `+10 / -5` | ±10.0 | 抵抗0.5-1.5N随机力 |
+
+#### Stage 2 三阶段课程学习
+
+| 阶段 | 步数范围 | 主要目标 | 配置 |
+|------|----------|----------|------|
+| **Phase 0** | 0-2M | 学习基础抓取 | 弱DR、近距离初始化(3-6cm)、无扰动 |
+| **Phase 1** | 2M-8M | 学习稳定抓取 | 滑移惩罚渐增(0.2→1.0)、更大初始化范围 |
+| **Phase 2** | 8M+ | 学习扰动抵抗 | 成功率>60%时激活扰动测试 |
 
 ---
 
@@ -205,7 +239,7 @@ python train_stage1.py checkpoint_tracking="outputs/Dcmm/2025-12-19/nn/best_rewa
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `num_envs` | 32 | 并行环境数 |
-| `train.ppo.img_dim` | [224, 224] | 深度图尺寸 |
+| `train.ppo.img_dim` | [84, 84] | 深度图尺寸 |
 | `train.ppo.action_catch_denorm` | [0.0, 0.025, 0.05] | 动作反归一化 [底盘, 手臂, 手部] |
 
 ---
@@ -286,14 +320,43 @@ python train_stage2.py test=True num_envs=1 \
 
 **AVP (Asymmetric Value Propagation)** 使用预训练的 Stage 2 Critic 为 Stage 1 提供"可抓取性"奖励信号。
 
+### [2025-01-04 重大更新] AVP改进
+
+1. **势能整形 (Potential-Based Shaping)**: `r_avp = λ × (γ·Φ(s') - Φ(s))`
+   - 奖励"向可抓取状态移动"，而非"处于可抓取状态"
+   - 避免在已高值状态停留刷分
+
+2. **OOD/置信度门控**:
+   - 视觉有效性检测：深度图有效像素比例低于60%时跳过
+   - MC Dropout不确定性估计：高不确定性时降低权重
+
+3. **自适应Lambda调度**:
+   - Warm-up阶段 (0-0.5M): λ=0，让进度奖励先主导
+   - Ramp-up阶段 (0.5M-0.6M): λ从0增加到λ_max(0.4)
+   - Full阶段 (0.6M-1.4M): λ=λ_max
+   - Decay阶段 (1.4M-2M): λ逐渐减小到λ_min(0.1)
+
 ### 配置位置 (`configs/env/DcmmCfg.py`)
 
 ```python
 class avp:
-    enabled = True                    # 主开关 (False=关闭AVP)
-    lambda_weight_start = 0.8         # 早期训练权重（强AVP引导）
-    lambda_weight_end = 0.2           # 后期训练权重（依赖原始奖励）
+    enabled = False                   # 主开关 (False=关闭AVP进行消融实验)
+    
+    # Lambda调度参数
+    warmup_steps = 500000             # 0.5M步: λ=0 (让进度奖励先主导)
+    lambda_max = 0.4                  # 训练中期最大λ
+    lambda_min = 0.1                  # 训练后期最小λ
+    
+    # 距离门控
     gate_distance = 1.5               # 距离门限 (仅在此距离内计算AVP)
+    
+    # OOD/置信度门控
+    depth_valid_threshold = 0.6       # 最小有效深度像素比例
+    mc_dropout_samples = 5            # MC采样数 (K=5)
+    uncertainty_alpha = 2.0           # exp(-α·σ) 置信度缩放
+    min_confidence = 0.3              # 最小置信度阈值
+    
+    # 网络配置
     checkpoint_path = "assets/checkpoints/avp/stage2_critic.pth"
     ready_pose = np.array([0.0, 0.0, 0.0, 1.8, 0.0, -0.785])  # 虚拟就绪姿态
     state_dim = 35                    # Stage 2 状态维度
@@ -306,19 +369,23 @@ class avp:
 Stage 1 当前状态
       │
       ▼
-构造虚拟观测:
+构造虚拟观测 (使用真实手臂状态):
 ┌─────────────────────────────────┐
-│ • 虚拟手臂姿态 (ready_pose)      │
+│ • 真实手臂关节/EE姿态           │
+│ • 真实EE速度 (clip到±0.5)       │
 │ • 真实物体位置                   │
-│ • 真实深度图                     │
-│ • 虚拟手部张开状态               │
+│ • 真实深度图 (带噪声)            │
+│ • 虚拟手部近抓取姿态             │
 └─────────────────────────────────┘
       │
       ▼
-Stage 2 Critic(虚拟观测) → value_estimate
+[OOD检测] 视觉有效性 + MC Dropout置信度
+      │ (低置信度时跳过)
+      ▼
+Stage 2 Critic(虚拟观测) → Φ(s')
       │
       ▼
-AVP奖励 = λ(t) × clip(value_estimate, -5, 5)
+势能整形: r_avp = λ(t) × clip(γ·Φ(s') - Φ(s), -0.2, 0.2)
       │
       ▼
 总奖励 = 原始Stage1奖励 + AVP奖励
@@ -338,47 +405,108 @@ cp outputs/Dcmm_Catch/.../nn/best_reward_XXX.pth assets/checkpoints/avp/stage2_c
 ### Stage 1 网络 (`ModelsStage1.py`)
 
 ```
-输入:
-├── State (15维) → MLP [256, 128] → 特征
-└── Depth (84×84) → CNN → 256维特征
-                          │
-                          ▼
-              Concatenate → [特征 + 256]
-                          │
-           ┌──────────────┴──────────────┐
-           ▼                             ▼
-      Actor MLP                    Critic MLP
-      [256, 128]                   [256, 128]
-           │                             │
-           ▼                             ▼
-        μ (8维)                     Value (1维)
-        σ (8维)
+┌─────────────────────────────────────────────────────────────┐
+│                      Stage 1 ActorCritic                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  State Input (15-16)       Depth Input (1×84×84)            │
+│       │                        │                            │
+│       │                   ┌────┴────┐                       │
+│       │                   │ CNNBase │                       │
+│       │                   │Conv(1→32,k3)+ReLU+Pool          │
+│       │                   │Conv(32→64,k3)+ReLU+Pool         │
+│       │                   │Conv(64→64,k3)+ReLU+Pool         │
+│       │                   │AdaptiveAvgPool(4×4)             │
+│       │                   │Flatten→Linear→256+ReLU          │
+│       │                   └────┬────┘                       │
+│       │                        │                            │
+│       └────────┬───────────────┘                            │
+│                │                                            │
+│           Concatenate (15+256=271)                          │
+│                │                                            │
+│       ┌────────┼────────┐ (可选: GRU层)                     │
+│       │        ▼        │                                   │
+│       │   GRU(hidden=128)                                   │
+│       │        │        │                                   │
+│       └────────┼────────┘                                   │
+│                │                                            │
+│       ┌────────┴────────┐                                   │
+│       │                 │                                   │
+│  Actor MLP         Critic MLP                               │
+│  [256, 128]        [256, 128]                               │
+│       │                 │                                   │
+│   ┌───┴───┐            │                                    │
+│   │       │            │                                    │
+│ [分离输出头]        Value(1)                                 │
+│ base(2) arm(6)                                              │
+│ σ_base  σ_arm                                               │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**CNN架构:**
-- Conv2d(1→32, k=3, s=1, p=1) + ReLU + MaxPool(2)
-- Conv2d(32→64, k=3, s=1, p=1) + ReLU + MaxPool(2)
-- Conv2d(64→64, k=3, s=1, p=1) + ReLU + MaxPool(2)
-- Flatten → Linear → 256
+**[2025-01-04 更新]:**
+- CNN增加AdaptiveAvgPool确保不同输入分辨率输出固定大小
+- 支持可选GRU层处理观测序列（应对帧丢失）
+- 分离输出头：底盘(2D)和手臂(6D)独立输出层和log_std
+
+**初始化细节:**
+- Hidden layers: `orthogonal_(gain=√2)`
+- Policy output (μ): `orthogonal_(gain=0.01)`
+- Value output: `orthogonal_(gain=1.0)`
+- σ: `constant_(-1.0)` → exp(-1.0) ≈ 0.37
 
 ### Stage 2 网络 (`ModelsStage2.py`)
 
 ```
-输入: Flattened [State(35) + Depth(84×84=7056)] = 7091维
-            │
-            ├── State → Actor MLP [256, 128] → μ (20维), σ (20维)
-            │
-            └── State → Value MLP [256, 128] ─┬─→ Concat
-                Depth → DepthCNN → 256维 ────┘    │
-                                                  ▼
-                                           Value Head → 1维
+┌─────────────────────────────────────────────────────────────┐
+│                      Stage 2 ActorCritic                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  Flattened Input: [State(35) | Depth(7056)] = 7091          │
+│       │                                                     │
+│       ├── Split ──┬────────────────┐                        │
+│       │           │                │                        │
+│   State(35)   Depth(7056)          │                        │
+│       │           │                │                        │
+│       │      Reshape→(1,84,84)     │                        │
+│       │           │                │                        │
+│       │      ┌────┴────┐           │                        │
+│       │      │DepthCNN │           │                        │
+│       │      │Conv(1→32,k8,s4)+ReLU│                        │
+│       │      │Conv(32→64,k4,s2)+ReLU                        │
+│       │      │Conv(64→32,k3,s1)+ReLU                        │
+│       │      │AdaptiveAvgPool(4×4) │                        │
+│       │      │Linear(512→256)+ReLU │                        │
+│       │      └────┬────┘           │                        │
+│       │           │                │                        │
+│  ┌────┴────┐  ┌───┴───────────────┴────┐                   │
+│  │Actor MLP│  │      Critic Path        │                   │
+│  │[256,128]│  │                         │                   │
+│  │         │  │State→Value MLP(256,128) │                   │
+│  │         │  │         │               │                   │
+│  │         │  │   Concat(128+256=384)   │                   │
+│  │         │  │         │               │                   │
+│  │         │  │   Value Head→1          │                   │
+│  └────┬────┘  └─────────┬───────────────┘                   │
+│       │                 │                                   │
+│  [分离输出头]            │                                    │
+│  arm(6)  hand(12)       │                                    │
+│  σ=-2.5   σ=-1.5        │                                    │
+│       │                 │                                   │
+│      μ(18)         Value(1)                                 │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**DepthCNN架构:**
-- Conv2d(1→32, k=8, s=4) + ReLU
-- Conv2d(32→64, k=4, s=2) + ReLU
-- Conv2d(64→32, k=3, s=1) + ReLU
-- Flatten → Linear(32×7×7 → 256) + ReLU
+**[2025-01-04 更新]:**
+- CNN增加AdaptiveAvgPool确保不同输入分辨率输出固定大小
+- 分离输出头：手臂(6D)和手部(12D)独立输出层
+- 分离log_std：手臂σ=-2.5(更稳定)，手部σ=-1.5(更多探索)
+- log_sigma限制范围[-5, 0]防止熵爆炸/塌缩
+
+**关键设计:**
+- Actor: 仅使用State (35维) - 避免视觉过拟合
+- Critic: State + Depth (35+7056维) - 更好的值估计
 
 ---
 
@@ -394,47 +522,60 @@ Picking_Sorting/
 ├── environment.yml                    # Conda环境配置
 │
 ├── configs/
-│   ├── config_stage1.yaml             # Stage 1 主配置
-│   ├── config_stage2.yaml             # Stage 2 主配置
+│   ├── config_stage1.yaml             # Stage 1 主配置 (Hydra)
+│   ├── config_stage2.yaml             # Stage 2 主配置 (Hydra)
 │   ├── env/
-│   │   └── DcmmCfg.py                 # 环境参数 + AVP配置 + 课程学习
+│   │   └── DcmmCfg.py                 # 环境参数 + AVP配置 + 课程学习 + 域随机化 + GRU配置
 │   └── train/
 │       ├── stage1/PPO_Stage1.yaml     # Stage 1 PPO超参数
 │       └── stage2/PPO_Stage2.yaml     # Stage 2 PPO超参数
 │
 ├── gym_dcmm/
-│   ├── __init__.py                    # 注册Gym环境
+│   ├── __init__.py                    # 注册Gymnasium环境
+│   │                                   # - gym_dcmm/DcmmVecWorld-v0 (Stage 1)
+│   │                                   # - gym_dcmm/DcmmVecWorldCatch-v0 (Stage 2)
 │   ├── agents/
 │   │   └── MujocoDcmm.py              # 机器人MuJoCo模型封装
+│   │
 │   ├── envs/
 │   │   ├── stage1/
-│   │   │   ├── DcmmVecEnvStage1.py    # Stage 1 环境
-│   │   │   └── RewardManagerStage1.py # Stage 1 奖励管理 (含AVP)
+│   │   │   ├── DcmmVecEnvStage1.py    # Stage 1 环境 (预抓取姿态成功判定)
+│   │   │   └── RewardManagerStage1.py # Stage 1 奖励管理 (Progress-based + AVP)
 │   │   ├── stage2/
-│   │   │   ├── DcmmVecEnvStage2.py    # Stage 2 环境
-│   │   │   └── RewardManagerStage2.py # Stage 2 奖励管理
-│   │   ├── observation_manager.py     # 观测处理
-│   │   ├── control_manager.py         # 控制管理
-│   │   ├── randomization_manager.py   # 域随机化
-│   │   ├── render_manager.py          # 渲染管理
-│   │   └── constants.py               # 常量定义
+│   │   │   ├── DcmmVecEnvStage2.py    # Stage 2 环境 (三阶段课程)
+│   │   │   ├── RewardManagerStage2.py # Stage 2 奖励管理 (抓取质量 + 滑移/冲击惩罚)
+│   │   │   └── test_stage2_optimizations.py  # Stage 2 优化测试
+│   │   │
+│   │   ├── observation_manager.py     # 观测处理 (含帧丢失模拟)
+│   │   │                               # - get_obs(): Stage 1 观测
+│   │   │                               # - get_state_obs_stage2(): Stage 2 观测
+│   │   │                               # - get_relative_object_pos3d_with_noise(): 带噪声物体位置
+│   │   │
+│   │   ├── control_manager.py         # 控制管理器
+│   │   ├── randomization_manager.py   # 域随机化管理器 (含Stage 2 AVP场景)
+│   │   ├── render_manager.py          # 渲染管理器 (深度噪声处理)
+│   │   └── constants.py               # 环境常量
+│   │
 │   ├── algs/ppo_dcmm/
 │   │   ├── stage1/
-│   │   │   ├── PPO_Stage1.py          # Stage 1 PPO算法
-│   │   │   └── ModelsStage1.py        # Stage 1 神经网络
+│   │   │   ├── PPO_Stage1.py          # Stage 1 PPO算法 (含GRU支持)
+│   │   │   └── ModelsStage1.py        # Stage 1 网络 (分离头 + 可选GRU)
 │   │   ├── stage2/
 │   │   │   ├── PPO_Stage2.py          # Stage 2 PPO算法
-│   │   │   └── ModelsStage2.py        # Stage 2 神经网络
+│   │   │   └── ModelsStage2.py        # Stage 2 网络 (分离arm/hand头)
 │   │   ├── experience.py              # 经验缓冲
 │   │   └── utils.py                   # 工具函数 (RunningMeanStd等)
+│   │
 │   └── utils/
 │       ├── quat_utils.py              # 四元数工具
+│       ├── pid.py                     # PID控制器
+│       ├── ik_pkg/                    # 逆运动学包
 │       └── util.py                    # 通用工具
 │
 ├── assets/
 │   ├── checkpoints/avp/               # AVP预训练权重
 │   │   └── stage2_critic.pth
-│   ├── urdf/                          # MuJoCo机器人模型
+│   ├── urdf/                          # MuJoCo机器人/场景模型
 │   ├── meshes/                        # 3D网格模型
 │   ├── textures/                      # 纹理贴图
 │   └── objects/                       # 物体模型
@@ -454,25 +595,47 @@ Picking_Sorting/
 
 ```python
 class curriculum:
-    # Stage 1 课程学习步数
-    stage1_steps = 2e6      # 2M步完成课程
-    stage2_steps = 10e6     # Stage 2 扩展课程
+    # ========================================
+    # Stage 1 课程学习
+    # ========================================
+    stage1_steps = 2e6      # 2M步完成基础课程
     
-    # 碰撞惩罚渐进 (从轻到重)
+    # [NEW 2025-01-04] 距离初始化课程
+    stage1_init_dist_start = (0.8, 1.2)   # 初期：较近目标
+    stage1_init_dist_mid = (0.6, 1.8)     # 中期：扩大范围
+    stage1_init_dist_full = (0.4, 2.5)    # 全难度范围
+    stage1_dist_expand_step1 = 1e6        # 1M步扩展到中期
+    stage1_dist_expand_step2 = 3e6        # 3M步扩展到全难度
+    
+    # ========================================
+    # Stage 2 三阶段课程学习 [NEW 2025-01-04]
+    # ========================================
+    stage2_steps = 10e6     # 扩展课程周期
+    
+    # Phase 0: 学习基础抓取 (弱DR、近距离初始化)
+    stage2_phase0_steps = 2e6             # 前2M步
+    stage2_phase0_init_dist = (0.03, 0.06)  # 非常近的初始化
+    stage2_phase0_angle_err = 10            # 最大初始角度误差(度)
+    stage2_phase0_dr_scale = 0.3            # 弱域随机化
+    
+    # Phase 1: 学习稳定抓取 (增加滑移惩罚)
+    stage2_phase1_steps = 6e6             # 2M-8M步
+    stage2_phase1_init_dist = (0.03, 0.12)
+    stage2_phase1_slip_weight_start = 0.2   # 滑移惩罚渐增
+    stage2_phase1_slip_weight_end = 1.0
+    
+    # Phase 2: 学习扰动抵抗 (成功率>60%时激活扰动)
+    stage2_phase2_steps = 4e6             # 8M-12M步
+    stage2_phase2_perturbation_start_success = 0.60
+    
+    # ========================================
+    # 碰撞和朝向课程
+    # ========================================
     collision_stem_start = -0.1   # 初始轻微惩罚
     collision_stem_end = -2.0     # 最终严厉惩罚
     
-    # 朝向要求渐进 (从宽松到严格)
     orient_power_start = 1.0      # 初始线性
     orient_power_end = 1.5        # 最终1.5次方
-    
-    # 两阶段训练配置 (Stage 2)
-    phase1_steps = 15e6     # Phase 1: Actor + Critic
-    phase2_steps = 10e6     # Phase 2: Critic only
-    
-    # 自适应课程
-    success_rate_threshold = 0.3
-    phase_switch_success_threshold = 0.30
 ```
 
 ---
@@ -500,6 +663,26 @@ class curriculum:
 | `diffuse_range` | (0.3, 0.8) | 漫反射强度 |
 | `dir_noise` | 0.3 | 光源方向噪声 |
 
+### [NEW] 物体位置噪声 (`DcmmCfg.obj_pos_noise`)
+
+模拟YOLO检测噪声和帧丢失：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `gaussian_std` | 0.02 | 高斯噪声标准差(米) |
+| `drop_probability` | 0.1 | 单帧丢失概率(10%) |
+| `consecutive_drop_prob` | 0.05 | 连续丢失起始概率(5%) |
+| `consecutive_drop_length` | (2, 5) | 连续丢失帧数范围 |
+| `add_validity_flag` | True | 添加is_valid标志帮助网络 |
+
+### [NEW] GRU配置 (`DcmmCfg.gru_config`)
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | True | 启用GRU记忆模块 |
+| `hidden_size` | 128 | GRU隐藏层大小 |
+| `num_layers` | 1 | GRU层数 |
+
 ---
 
 ## ❓ 常见问题
@@ -512,15 +695,25 @@ class curriculum:
 
 ### Q: 训练速度太慢?
 **A**: 
-1. 增大 `num_envs`（建议不超过CPU核心数，最大18）
+1. 增大 `num_envs`（建议不超过CPU核心数，最大32）
 2. 确保使用GPU (`device_id=0`)
 3. 关闭WandB (`wandb_mode=disabled`)
+4. 关闭GRU (`gru_config.enabled=False` 在 DcmmCfg.py 中)
 
 ### Q: 显存不足 (OOM)?
-**A**: 减少 `num_envs` 或 `minibatch_size`。
+**A**: 减少 `num_envs` 或 `minibatch_size`。Stage 2 因为深度图处理可能需要更多显存。
 
 ### Q: Stage 2 训练不稳定?
-**A**: 检查Stage 2 Critic是否已训练收敛后再用于AVP。
+**A**: 
+1. 检查Stage 2 Critic是否已训练收敛后再用于AVP
+2. 确保三阶段课程学习正确配置
+3. 观察滑移惩罚和冲击惩罚是否过大
+
+### Q: Stage 1 预抓取成功率低?
+**A**: 
+1. 检查预抓取条件是否过严（默认d_ee<0.05m, 角度<15°）
+2. 可以调整 `r_pregrasp_success` 权重
+3. 确保进度奖励权重足够大
 
 ### Q: 如何查看训练曲线?
 **A**: 
@@ -532,6 +725,9 @@ class curriculum:
 1. 在 `assets/objects/` 添加物体mesh
 2. 修改 `assets/urdf/` 中的MJCF文件
 3. 在 `DcmmCfg.py` 的 `object_shape` 和 `object_size` 中添加配置
+
+### Q: 帧丢失模拟如何关闭?
+**A**: 在 `DcmmCfg.py` 中设置 `obj_pos_noise.enabled = False`
 
 ---
 
