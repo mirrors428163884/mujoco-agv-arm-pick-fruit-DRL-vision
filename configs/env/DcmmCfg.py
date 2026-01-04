@@ -62,6 +62,15 @@ reward_weights = {
     "r_orientation_v2": 0.4,        # Cosine-based orientation reward (recommended: 0.2-0.6)
     
     # ========================================
+    # Stage 1: Milestone Rewards (NEW 2025-01-04)
+    # One-time bonuses for reaching distance thresholds, fills gap between
+    # dense progress rewards and sparse success bonus
+    # ========================================
+    "r_milestone_1m": 5.0,          # Bonus for entering < 1.0m range
+    "r_milestone_05m": 10.0,        # Bonus for entering < 0.5m range
+    "r_milestone_02m": 15.0,        # Bonus for entering < 0.2m range
+    
+    # ========================================
     # Stage 1: Terminal Rewards (UPDATED)
     # ========================================
     "r_pregrasp_success": 50.0,     # Pre-grasp pose achieved (recommended: 30-80)
@@ -130,6 +139,9 @@ reward_weights = {
     # Joint and heading rewards
     "r_joint_limit": -2.0,
     "r_base_heading": 0.5,
+    # [NEW 2025-01-04] Distance gate for base heading reward (prevent "站桩刷分")
+    # Only reward orientation when base is closer than this distance
+    "r_base_heading_gate": 1.5,
     "r_contact_persistence": 2.0,
 }
 
@@ -409,23 +421,38 @@ class ground_dr:
 
 ## Object Position Noise Configuration (Domain Randomization for obj_pos)
 ## Simulates YOLO detection noise and frame drops
+## [UPDATED 2025-01-04] Added curriculum-based progressive randomization
 class obj_pos_noise:
     # Master switch
     enabled = True
     
+    # [NEW 2025-01-04] Curriculum-based progressive randomization
+    # Phase 0 (0-1M steps): Disabled or very low probability
+    # Phase 1 (1M-2M steps): Gradually increase to full strength
+    # Phase 2 (2M+ steps): Full randomization
+    curriculum_enabled = True
+    curriculum_phase0_steps = 1e6   # 1M steps with minimal noise
+    curriculum_phase1_steps = 2e6   # 2M steps to full strength
+    
     # Gaussian noise (simulates sensor random measurement errors)
     gaussian_enabled = True
     gaussian_std = 0.02  # Standard deviation in meters (2cm noise)
+    # Curriculum: std scales from 0.005 (phase 0) to full std (phase 2)
+    gaussian_std_start = 0.005
     
     # Frame drop simulation (simulates YOLO detection failures)
     frame_drop_enabled = True
     drop_probability = 0.1  # 10% chance of frame drop per step
     drop_use_zero = False   # If True, set to 0; if False, use previous frame value
+    # Curriculum: probability scales from 0.02 (phase 0) to full probability (phase 2)
+    drop_probability_start = 0.02
     
     # Consecutive frame drop simulation (simulates prolonged detection loss)
     consecutive_drop_enabled = True
     consecutive_drop_prob = 0.05  # 5% chance to start consecutive drop sequence
     consecutive_drop_length = (2, 5)  # Range of consecutive frames to drop
+    # Curriculum: disabled in phase 0, gradually enabled in phase 1
+    consecutive_drop_prob_start = 0.0
     
     # Observation validity flag (helps network distinguish dropped vs valid observations)
     add_validity_flag = True  # If True, adds 1-bit is_valid flag to observation

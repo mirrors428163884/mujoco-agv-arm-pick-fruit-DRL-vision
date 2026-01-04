@@ -82,6 +82,12 @@ class RewardManagerStage1:
         self.stagnation_threshold = 10  # N steps without progress triggers penalty
         self.min_progress_threshold = 0.001  # Minimum distance change to count as progress
         
+        # [NEW 2025-01-04] Milestone tracking for one-time bonuses
+        # Tracks which milestone thresholds have been reached in current episode
+        self.milestone_1m_reached = False   # Reached < 1.0m
+        self.milestone_05m_reached = False  # Reached < 0.5m
+        self.milestone_02m_reached = False  # Reached < 0.2m
+        
         # Initialize reward statistics
         self._init_reward_stats()
         
@@ -254,14 +260,20 @@ class RewardManagerStage1:
         r_base_heading = self._compute_base_heading_reward(info)
         
         # ========================================
-        # 4. TERMINAL REWARDS
+        # 4. MILESTONE REWARDS (one-time bonuses)
+        # [NEW 2025-01-04] Fill gap between dense progress and sparse success
+        # ========================================
+        r_milestone = self._compute_milestone_reward(info)
+        
+        # ========================================
+        # 5. TERMINAL REWARDS
         # ========================================
         r_collision = self._compute_collision_penalty()  # -50 for collision
         r_timeout = self._compute_timeout_penalty()  # -20 for timeout
         r_success = self._compute_pregrasp_success_bonus(info)  # +50 for pre-grasp achieved
         
         # ========================================
-        # 5. OPTIONAL: AVP (if enabled)
+        # 6. OPTIONAL: AVP (if enabled)
         # ========================================
         r_avp = self.compute_avp_reward(obs, info)
         
@@ -279,6 +291,8 @@ class RewardManagerStage1:
             r_alive + r_stagnation + r_action_rate + r_regularization + r_joint_limit +
             # Conditional rewards
             r_orientation + r_base_heading +
+            # Milestone bonuses
+            r_milestone +
             # Collision penalties
             r_collision + r_plant_collision + r_timeout +
             # Success/failure
@@ -290,7 +304,7 @@ class RewardManagerStage1:
         # Update statistics for logging
         self._update_reward_stats_v2(
             info, r_ee_progress, r_base_progress, r_alive, r_stagnation,
-            r_orientation, r_collision, r_success, r_touch
+            r_orientation, r_collision, r_success, r_touch, r_milestone
         )
 
         # Debug output
@@ -299,7 +313,7 @@ class RewardManagerStage1:
                 r_ee_progress, r_base_progress, r_alive, r_stagnation,
                 r_orientation, r_base_heading, r_touch, r_collision,
                 r_plant_collision, r_action_rate, r_avp, r_success,
-                r_timeout, info, total_reward
+                r_timeout, r_milestone, info, total_reward
             )
 
         return total_reward
@@ -561,14 +575,58 @@ class RewardManagerStage1:
             return DcmmCfg.reward_weights.get("r_timeout", -20.0)
         return 0.0
     
+    def _compute_milestone_reward(self, info):
+        """
+        Compute one-time milestone bonus rewards for reaching distance thresholds.
+        
+        [NEW 2025-01-04] Provides intermediate rewards between dense rewards and
+        final success bonus, filling the gap in reward signal when agent is 
+        making good progress.
+        
+        Milestones:
+        - 1.0m: +5.0 (first approach)
+        - 0.5m: +10.0 (getting close)
+        - 0.2m: +15.0 (final approach)
+        
+        Each milestone can only be triggered once per episode.
+        
+        Args:
+            info: Environment info containing ee_distance
+            
+        Returns:
+            float: Milestone bonus (0 if no new milestone reached)
+        """
+        ee_dist = info["ee_distance"]
+        reward = 0.0
+        
+        # Check milestones in order (furthest to closest)
+        if not self.milestone_1m_reached and ee_dist < 1.0:
+            self.milestone_1m_reached = True
+            reward += DcmmCfg.reward_weights.get("r_milestone_1m", 5.0)
+        
+        if not self.milestone_05m_reached and ee_dist < 0.5:
+            self.milestone_05m_reached = True
+            reward += DcmmCfg.reward_weights.get("r_milestone_05m", 10.0)
+        
+        if not self.milestone_02m_reached and ee_dist < 0.2:
+            self.milestone_02m_reached = True
+            reward += DcmmCfg.reward_weights.get("r_milestone_02m", 15.0)
+        
+        return reward
+    
     def reset_progress_tracking(self):
         """Reset progress tracking variables for new episode.
         
-        [UPDATED 2025-01-04] Also resets AVP potential-based shaping state.
+        [UPDATED 2025-01-04] Also resets AVP potential-based shaping state and milestones.
         """
         self.prev_ee_distance = None
         self.prev_base_distance = None
         self.stagnation_counter = 0
+        
+        # [NEW 2025-01-04] Reset milestone tracking
+        self.milestone_1m_reached = False
+        self.milestone_05m_reached = False
+        self.milestone_02m_reached = False
         
         # [NEW 2025-01-04] Reset AVP potential for new episode
         if self.use_avp:
@@ -818,15 +876,24 @@ class RewardManagerStage1:
         """
         Reward for base facing toward target.
         
-        Encourages the robot base to orient toward the target object,
-        which helps with reaching and manipulation.
+        [UPDATED 2025-01-04] Added distance gate to prevent "站桩刷分" behavior
+        (agent spinning in place to farm orientation reward without approaching).
+        
+        Only gives orientation reward when:
+        - Base distance > 1.5m: No orientation reward (focus on approaching first)
+        - Base distance <= 1.5m: Full orientation reward
         
         Args:
             info: Environment info containing distances
             
         Returns:
-            float: Reward value (0.5 when perfectly aligned)
+            float: Reward value (0.5 when perfectly aligned, 0 if gated)
         """
+        # [NEW 2025-01-04] Distance gate to prevent spinning in place
+        gate_distance = DcmmCfg.reward_weights.get('r_base_heading_gate', 1.5)
+        if info["base_distance"] > gate_distance:
+            return 0.0
+        
         base_pos = self.env.Dcmm.data.body("base_link").xpos[:2]
         obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos[:2]
         
@@ -1223,6 +1290,8 @@ class RewardManagerStage1:
             # Conditional rewards
             'orientation_sum': 0.0,
             'base_heading_sum': 0.0,
+            # [NEW 2025-01-04] Milestone rewards
+            'milestone_sum': 0.0,
             # Terminal rewards
             'collision_sum': 0.0,
             'success_sum': 0.0,
@@ -1245,7 +1314,7 @@ class RewardManagerStage1:
     
     def _update_reward_stats_v2(self, info, r_ee_progress, r_base_progress,
                                 r_alive, r_stagnation, r_orientation,
-                                r_collision, r_success, r_touch):
+                                r_collision, r_success, r_touch, r_milestone=0.0):
         """Update running statistics for new reward structure logging."""
         self.reward_stats['ee_progress_sum'] += r_ee_progress
         self.reward_stats['base_progress_sum'] += r_base_progress
@@ -1255,6 +1324,8 @@ class RewardManagerStage1:
         self.reward_stats['collision_sum'] += r_collision
         self.reward_stats['success_sum'] += r_success
         self.reward_stats['touch_sum'] += r_touch
+        # [NEW 2025-01-04] Milestone tracking
+        self.reward_stats['milestone_sum'] += r_milestone
         self.reward_stats['ee_distance_sum'] += info["ee_distance"]
         self.reward_stats['base_distance_sum'] += info["base_distance"]
         self.reward_stats['count'] += 1
@@ -1305,6 +1376,8 @@ class RewardManagerStage1:
             'rewards/collision_mean': self.reward_stats['collision_sum'] / count,
             'rewards/success_mean': self.reward_stats['success_sum'] / count,
             'rewards/touch_mean': self.reward_stats['touch_sum'] / count,
+            # [NEW 2025-01-04] Milestone rewards
+            'rewards/milestone_mean': self.reward_stats['milestone_sum'] / count,
             # Legacy (for comparison)
             'rewards/reaching_mean': self.reward_stats['reaching_sum'] / count,
             'rewards/base_approach_mean': self.reward_stats['base_approach_sum'] / count,
@@ -1415,7 +1488,7 @@ class RewardManagerStage1:
                                    r_alive, r_stagnation, r_orientation,
                                    r_base_heading, r_touch, r_collision,
                                    r_plant_collision, r_action_rate, r_avp,
-                                   r_success, r_timeout, info, total):
+                                   r_success, r_timeout, r_milestone, info, total):
         """Print detailed reward breakdown for debugging (new progress-based version)."""
         print("=" * 50)
         print("REWARD BREAKDOWN (Progress-Based)")
@@ -1431,6 +1504,8 @@ class RewardManagerStage1:
         print(f"[CONDITIONAL]")
         print(f"  Orientation:      {r_orientation:>8.4f}")
         print(f"  Base Heading:     {r_base_heading:>8.4f}")
+        print(f"[MILESTONES]")
+        print(f"  Milestone:        {r_milestone:>8.4f}")
         print(f"[TERMINAL]")
         print(f"  Collision:        {r_collision:>8.4f}")
         print(f"  Timeout:          {r_timeout:>8.4f}")

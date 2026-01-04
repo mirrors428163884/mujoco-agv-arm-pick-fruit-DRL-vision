@@ -129,6 +129,11 @@ class ObservationManager:
         """
         Get object position relative to base in base frame with domain randomization noise.
         
+        [UPDATED 2025-01-04] Now supports curriculum-based progressive randomization:
+        - Phase 0 (0-1M steps): Minimal noise
+        - Phase 1 (1M-2M steps): Gradually increase to full strength
+        - Phase 2 (2M+ steps): Full randomization
+        
         Applies:
         1. Gaussian noise: Simulates sensor random measurement errors
         2. Frame drop: Simulates YOLO detection failures (returns 0 or previous value)
@@ -145,6 +150,9 @@ class ObservationManager:
         # Check if noise is enabled
         if not DcmmCfg.obj_pos_noise.enabled:
             return true_obj_pos.astype(np.float32), np.float32(1.0)
+        
+        # [NEW 2025-01-04] Get curriculum-adjusted noise parameters
+        noise_params = self._get_curriculum_noise_params()
         
         # Initialize previous position if not set
         if self._prev_obj_pos is None:
@@ -167,18 +175,18 @@ class ObservationManager:
         # Check for frame drop
         frame_dropped = False
         
-        # Start consecutive drop sequence with small probability
+        # Start consecutive drop sequence with curriculum-adjusted probability
         if DcmmCfg.obj_pos_noise.consecutive_drop_enabled:
-            if np.random.random() < DcmmCfg.obj_pos_noise.consecutive_drop_prob:
+            if np.random.random() < noise_params['consecutive_drop_prob']:
                 drop_len_range = DcmmCfg.obj_pos_noise.consecutive_drop_length
                 # Sample total drop length (including this frame); counter stores remaining future drops
                 self._consecutive_drop_counter = np.random.randint(
                     drop_len_range[0], drop_len_range[1] + 1) - 1
                 frame_dropped = True
         
-        # Single frame drop
+        # Single frame drop with curriculum-adjusted probability
         if not frame_dropped and DcmmCfg.obj_pos_noise.frame_drop_enabled:
-            if np.random.random() < DcmmCfg.obj_pos_noise.drop_probability:
+            if np.random.random() < noise_params['drop_probability']:
                 frame_dropped = True
         
         if frame_dropped:
@@ -188,16 +196,78 @@ class ObservationManager:
             else:
                 noisy_obj_pos = self._prev_obj_pos.copy()
         else:
-            # Apply Gaussian noise to valid observations
+            # Apply Gaussian noise with curriculum-adjusted std
             if DcmmCfg.obj_pos_noise.gaussian_enabled:
                 gaussian_noise = np.random.normal(
-                    0, DcmmCfg.obj_pos_noise.gaussian_std, size=3)
+                    0, noise_params['gaussian_std'], size=3)
                 noisy_obj_pos = true_obj_pos + gaussian_noise
             
             # Update previous position with true (noisy but detected) position
             self._prev_obj_pos = noisy_obj_pos.copy()
         
         return noisy_obj_pos.astype(np.float32), is_valid
+    
+    def _get_curriculum_noise_params(self):
+        """
+        Get curriculum-adjusted noise parameters based on global training step.
+        
+        [NEW 2025-01-04] Progressive domain randomization:
+        - Phase 0: Minimal noise to help initial learning
+        - Phase 1: Linearly interpolate from phase 0 to full noise
+        - Phase 2: Full noise strength
+        
+        Returns:
+            dict: Curriculum-adjusted noise parameters
+        """
+        # Get global step from environment
+        global_step = getattr(self.env, 'global_step', 0)
+        
+        # Check if curriculum is enabled
+        if not getattr(DcmmCfg.obj_pos_noise, 'curriculum_enabled', False):
+            # No curriculum, return full parameters
+            return {
+                'gaussian_std': DcmmCfg.obj_pos_noise.gaussian_std,
+                'drop_probability': DcmmCfg.obj_pos_noise.drop_probability,
+                'consecutive_drop_prob': DcmmCfg.obj_pos_noise.consecutive_drop_prob,
+            }
+        
+        # Get curriculum milestones
+        phase0_steps = DcmmCfg.obj_pos_noise.curriculum_phase0_steps  # 1M
+        phase1_steps = DcmmCfg.obj_pos_noise.curriculum_phase1_steps  # 2M
+        
+        # Phase 0: Minimal noise
+        if global_step < phase0_steps:
+            return {
+                'gaussian_std': getattr(DcmmCfg.obj_pos_noise, 'gaussian_std_start', 0.005),
+                'drop_probability': getattr(DcmmCfg.obj_pos_noise, 'drop_probability_start', 0.02),
+                'consecutive_drop_prob': getattr(DcmmCfg.obj_pos_noise, 'consecutive_drop_prob_start', 0.0),
+            }
+        
+        # Phase 2: Full noise
+        if global_step >= phase1_steps:
+            return {
+                'gaussian_std': DcmmCfg.obj_pos_noise.gaussian_std,
+                'drop_probability': DcmmCfg.obj_pos_noise.drop_probability,
+                'consecutive_drop_prob': DcmmCfg.obj_pos_noise.consecutive_drop_prob,
+            }
+        
+        # Phase 1: Linear interpolation
+        progress = (global_step - phase0_steps) / (phase1_steps - phase0_steps)
+        
+        std_start = getattr(DcmmCfg.obj_pos_noise, 'gaussian_std_start', 0.005)
+        std_end = DcmmCfg.obj_pos_noise.gaussian_std
+        
+        drop_start = getattr(DcmmCfg.obj_pos_noise, 'drop_probability_start', 0.02)
+        drop_end = DcmmCfg.obj_pos_noise.drop_probability
+        
+        cons_start = getattr(DcmmCfg.obj_pos_noise, 'consecutive_drop_prob_start', 0.0)
+        cons_end = DcmmCfg.obj_pos_noise.consecutive_drop_prob
+        
+        return {
+            'gaussian_std': std_start + progress * (std_end - std_start),
+            'drop_probability': drop_start + progress * (drop_end - drop_start),
+            'consecutive_drop_prob': cons_start + progress * (cons_end - cons_start),
+        }
     
     def reset_noise_state(self):
         """Reset noise state variables. Call this on environment reset."""
