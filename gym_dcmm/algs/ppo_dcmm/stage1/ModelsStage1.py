@@ -230,6 +230,32 @@ class ActorCritic(nn.Module):
         else:
             torch.save(self.mu.state_dict(), actor_head_path)
 
+    def load_actor(self, actor_mlp_path, actor_head_path, map_location=None):
+        """
+        Load actor model parameters from files.
+
+        Args:
+            actor_mlp_path: Path to load actor MLP parameters from.
+            actor_head_path: Path to load actor head parameters from.
+            map_location: Optional device mapping for torch.load.
+        """
+        # Load shared MLP parameters
+        mlp_state = torch.load(actor_mlp_path, map_location=map_location)
+        self.actor_mlp.load_state_dict(mlp_state)
+
+        # Load head parameters according to configuration
+        head_state = torch.load(actor_head_path, map_location=map_location)
+        if self.use_separate_heads:
+            # Expected format: {'base_head': ..., 'arm_head': ...}
+            if isinstance(head_state, dict) and 'base_head' in head_state and 'arm_head' in head_state:
+                self.base_head.load_state_dict(head_state['base_head'])
+                self.arm_head.load_state_dict(head_state['arm_head'])
+            else:
+                # Backward-compatible fallback: treat as a single head for base_head
+                self.base_head.load_state_dict(head_state)
+        else:
+            # Single-head configuration
+            self.mu.load_state_dict(head_state)
     @torch.no_grad()
     def act(self, obs_dict, hidden_state=None):
         """
