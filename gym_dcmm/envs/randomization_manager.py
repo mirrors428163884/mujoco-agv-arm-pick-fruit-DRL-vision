@@ -154,6 +154,8 @@ class RandomizationManager:
         2. Select an Occluder Stem.
         3. Move Occluder Stem to block the path to Target Stem.
         4. Attach fruit to Target Stem.
+        
+        [UPDATED 2025-01-04] Now respects curriculum-based distance initialization.
         """
         # Select Target Stem (0-7)
         target_idx = np.random.randint(0, 8)
@@ -187,18 +189,63 @@ class RandomizationManager:
         # Move Occluder
         self.env.Dcmm.data.mocap_pos[occluder_mocap_id] = occluder_pos
 
-        # Now attach fruit to Target Stem
+        # [NEW 2025-01-04] Get curriculum-based distance range
+        dist_range = self._get_curriculum_distance_range()
+        
+        # Now attach fruit to Target Stem with curriculum-adjusted distance
         stem_pos = target_pos
         height = np.random.uniform(0.8, 1.5)
-        offset_x = np.random.uniform(-0.05, 0.05)
-        offset_y = np.random.uniform(-0.05, 0.05)
-
-        fruit_x = stem_pos[0] + offset_x
-        fruit_y = stem_pos[1] + offset_y
+        
+        # [UPDATED 2025-01-04] Adjust fruit position based on curriculum distance
+        # This controls how far the fruit is from the robot
+        target_distance = np.random.uniform(dist_range[0], dist_range[1])
+        
+        # Direction from robot to stem
+        to_stem = stem_pos[:2] - robot_pos[:2]
+        to_stem_dist = np.linalg.norm(to_stem)
+        
+        if to_stem_dist > 0.1:
+            to_stem_norm = to_stem / to_stem_dist
+            # Place fruit at target_distance from robot
+            fruit_x = robot_pos[0] + to_stem_norm[0] * target_distance
+            fruit_y = robot_pos[1] + to_stem_norm[1] * target_distance
+        else:
+            # Fallback: random offset
+            offset_x = np.random.uniform(-0.05, 0.05)
+            offset_y = np.random.uniform(-0.05, 0.05)
+            fruit_x = stem_pos[0] + offset_x
+            fruit_y = stem_pos[1] + offset_y
 
         self.env.object_pos3d = np.array([fruit_x, fruit_y, height])
         self.env.object_vel6d = np.zeros(6)
         self.env.object_q = np.array([1.0, 0.0, 0.0, 0.0])
+
+    def _get_curriculum_distance_range(self):
+        """
+        Get curriculum-based target distance range for Stage 1.
+        
+        [NEW 2025-01-04] Implements distance-based initialization curriculum:
+        - Early training: closer targets (0.8-1.2m)
+        - Mid training: medium range (0.6-1.8m)
+        - Late training: full range (0.4-2.5m)
+        
+        Returns:
+            tuple: (min_dist, max_dist) in meters
+        """
+        global_step = getattr(self.env, 'global_step', 0)
+        
+        step1 = DcmmCfg.curriculum.stage1_dist_expand_step1  # 1M
+        step2 = DcmmCfg.curriculum.stage1_dist_expand_step2  # 3M
+        
+        if global_step < step1:
+            # Phase 0: Close targets
+            return DcmmCfg.curriculum.stage1_init_dist_start  # (0.8, 1.2)
+        elif global_step < step2:
+            # Phase 1: Medium range
+            return DcmmCfg.curriculum.stage1_init_dist_mid  # (0.6, 1.8)
+        else:
+            # Phase 2: Full range
+            return DcmmCfg.curriculum.stage1_init_dist_full  # (0.4, 2.5)
 
 
     def random_PID(self):
