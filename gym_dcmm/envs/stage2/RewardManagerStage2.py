@@ -158,20 +158,37 @@ class RewardManagerStage2:
     def _should_apply_perturbation(self):
         """
         Curriculum-based perturbation scheduling:
-        - 0-2M:  Disabled (learn basic grasp first)
-        - 2M-10M: 10% -> 50% gradual ramp-up
-        - 10M+: 50% episodes (full robustness test)
+        
+        [UPDATED 2025-01-04] Three-phase curriculum:
+        - Phase 0 (0-2M): Disabled (learn basic grasp first)
+        - Phase 1 (2M-8M): 10% -> 30% gradual ramp-up
+        - Phase 2 (8M+): Only if success_rate > 60%
         """
         step = self.env.global_step
-
-        if step < 2e6:
+        
+        # Phase 0: No perturbation
+        phase0_end = DcmmCfg.curriculum.stage2_phase0_steps
+        if step < phase0_end:
             return False
-        elif step < 10e6:
-            # Linear ramp from 10% to 50%
-            prob = 0.1 + 0.4 * ((step - 2e6) / 8e6)
+        
+        # Phase 1: Gradual ramp-up
+        phase1_end = DcmmCfg.curriculum.stage2_phase1_steps
+        if step < phase1_end:
+            # Linear ramp from 10% to 30%
+            prob = 0.1 + 0.2 * ((step - phase0_end) / (phase1_end - phase0_end))
             return np.random.random() < prob
-        else:
-            return np.random.random() < 0.5
+        
+        # Phase 2: Only apply if success rate is high enough
+        success_threshold = DcmmCfg.curriculum.stage2_phase2_perturbation_start_success
+        try:
+            success_rate = self.env.get_recent_success_rate()
+            if success_rate < success_threshold:
+                return False
+        except:
+            pass
+        
+        # Phase 2: 50% perturbation probability
+        return np.random.random() < 0.5
 
     def evaluate_grasp_stability(self, total_contact_force):
         """Modified with curriculum."""
@@ -502,12 +519,31 @@ class RewardManagerStage2:
         Slip penalty: penalize relative velocity between object and hand.
         r_slip = -k_s * |v_rel|
         
-        This is critical for learning stable grasp instead of "bump and done".
+        [UPDATED 2025-01-04] Curriculum-based slip penalty weight:
+        - Phase 0 (0-2M): k_s = 0.2 (weak, focus on basic grasp)
+        - Phase 1 (2M-8M): k_s ramps from 0.2 to 1.0
+        - Phase 2 (8M+): k_s = 1.0 (full penalty)
         
         Args:
             touch_sensors: Optional touch sensor readings to verify contact
         """
-        k_s = DcmmCfg.reward_weights.get("r_slip_penalty", 1.0)
+        # Get curriculum-adjusted slip weight
+        step = self.env.global_step
+        phase0_end = DcmmCfg.curriculum.stage2_phase0_steps
+        phase1_end = DcmmCfg.curriculum.stage2_phase1_steps
+        
+        if step < phase0_end:
+            # Phase 0: Weak slip penalty
+            k_s = DcmmCfg.curriculum.stage2_phase1_slip_weight_start
+        elif step < phase1_end:
+            # Phase 1: Ramp up slip penalty
+            progress = (step - phase0_end) / (phase1_end - phase0_end)
+            slip_start = DcmmCfg.curriculum.stage2_phase1_slip_weight_start
+            slip_end = DcmmCfg.curriculum.stage2_phase1_slip_weight_end
+            k_s = slip_start + (slip_end - slip_start) * progress
+        else:
+            # Phase 2: Full slip penalty
+            k_s = DcmmCfg.reward_weights.get("r_slip_penalty", 1.0)
         
         # Check for meaningful contact using force threshold
         min_contact_force = 0.02  # Minimum force for meaningful contact

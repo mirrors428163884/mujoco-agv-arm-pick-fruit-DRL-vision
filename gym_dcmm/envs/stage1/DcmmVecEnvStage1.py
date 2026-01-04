@@ -616,6 +616,50 @@ class DcmmVecEnvStage1(gym.Env):
             self.mujoco_renderer.close()
         if self.Dcmm.viewer != None:
             self.Dcmm.viewer.close()
+    
+    def get_handoff_state(self):
+        """
+        Get current state for Stage 2 handoff.
+        
+        [NEW 2025-01-04] Supports end-to-end Stage 1 → Stage 2 evaluation.
+        Returns state dict suitable for initializing Stage 2 environment.
+        
+        Returns:
+            dict: State information for Stage 2 initialization
+                - base_pos: Base position (x, y, z)
+                - base_quat: Base orientation quaternion
+                - arm_joints: Arm joint positions (6 DOF)
+                - ee_pos: End-effector position
+                - ee_quat: End-effector orientation
+                - object_pos: Object position
+                - object_quat: Object orientation
+                - ee_distance: Current EE-to-object distance
+        """
+        return {
+            'base_pos': self.Dcmm.data.body("base_link").xpos.copy(),
+            'base_quat': self.Dcmm.data.body("base_link").xquat.copy(),
+            'arm_joints': self.Dcmm.data.qpos[15:21].copy(),
+            'ee_pos': self.Dcmm.data.body("link6").xpos.copy(),
+            'ee_quat': self.Dcmm.data.body("link6").xquat.copy(),
+            'object_pos': self.Dcmm.data.body(self.object_name).xpos.copy(),
+            'object_quat': self.Dcmm.data.body(self.object_name).xquat.copy(),
+            'ee_distance': np.linalg.norm(
+                self.Dcmm.data.body("link6").xpos - 
+                self.Dcmm.data.body(self.object_name).xpos
+            ),
+        }
+    
+    def is_pregrasp_ready(self):
+        """
+        Check if robot is ready for Stage 2 handoff.
+        
+        [NEW 2025-01-04] Convenience method for end-to-end evaluation.
+        
+        Returns:
+            bool: True if pre-grasp pose achieved and ready for Stage 2
+        """
+        info = self._get_info()
+        return self._check_pregrasp_pose(info)
 
     def run_test(self):
         """Run a manual test with keyboard control."""

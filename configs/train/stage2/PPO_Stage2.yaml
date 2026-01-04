@@ -15,13 +15,20 @@ ppo:
   value_bootstrap: True
   num_actors: ${resolve_default:8,${...num_envs}}
   reward_scale_value: 0.1
-  clip_value_loss: False
+  
+  # [UPDATED 2025-01-04] Enable value clipping for large terminal rewards
+  # With success/failure gap of +100/-50, value targets have high variance
+  clip_value_loss: True
+  clip_range_vf: 0.2  # Same as e_clip for value function
+  
   normalize_advantage: True
   gamma: 0.99
   tau: 0.95
   
-  # [Modified] Lower learning rate for stability
-  learning_rate: 3e-4
+  # [UPDATED 2025-01-04] Separate learning rates for actor/critic
+  # Critic uses lower LR due to high variance from terminal rewards
+  learning_rate: 3e-4       # Actor learning rate
+  critic_lr: 1e-4           # Critic learning rate (lower for stability)
   lr_schedule: kl
   kl_threshold: 0.016
   
@@ -31,8 +38,11 @@ ppo:
   # [Modified] Stricter gradient clipping
   grad_norm: 0.5 
   
-  # [Critical] Enable entropy regularization to prevent early convergence to "playing dead"
-  entropy_coef: 0.01 
+  # [UPDATED 2025-01-04] Entropy schedule
+  # Higher early (exploration) → lower late (exploitation)
+  entropy_coef: 0.015       # Slightly higher for early exploration
+  entropy_coef_min: 0.005   # Decay to this value
+  entropy_decay_steps: 10e6 # Linear decay over 10M steps
   
   freeze_base: False
   freeze_arm: False
