@@ -339,9 +339,6 @@ class PPO_Stage1(object):
     def save(self, name):
         weights = {
             'model': self.model.state_dict(),
-            'tracking_mlp': self.model.actor_mlp.state_dict(),
-            'tracking_mu': self.model.mu.state_dict(),
-            'tracking_sigma': self.model.sigma.data
         }
         if self.running_mean_std:
             weights['running_mean_std'] = self.running_mean_std.state_dict()
