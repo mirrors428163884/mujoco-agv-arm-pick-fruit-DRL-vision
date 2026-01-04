@@ -45,8 +45,10 @@ def main(config: DictConfig):
     config.rl_device = f'cuda:{config.device_id}' if config.device_id >= 0 else 'cpu'
     
     # [Fix] Properly set seed (random.seed() returns None, so we need separate calls)
+    # Use time-based entropy source when seed is -1 for true randomness
     if config.seed == -1:
-        config.seed = random.randint(0, 2**31 - 1)
+        import time
+        config.seed = int(time.time() * 1000) % (2**31 - 1)
     random.seed(config.seed)
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)

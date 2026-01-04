@@ -19,6 +19,10 @@ import configs.env.DcmmCfg as DcmmCfg
 class PPO_Stage2(object):
     def __init__(self, env, output_dif, full_config):
         # [Hard Constraint] Stage2 does NOT use GRU - enforce at config level
+        # Note: Intentionally modifies global config to ensure consistent behavior
+        # across all components that may read gru_config.enabled (e.g., ExperienceBuffer).
+        # This prevents "configuration-level landmine" where Stage2 code paths might
+        # incorrectly enable GRU features based on the default config value.
         DcmmCfg.gru_config.enabled = False
         assert not DcmmCfg.gru_config.enabled, "Stage2 must have gru_config.enabled=False"
         
