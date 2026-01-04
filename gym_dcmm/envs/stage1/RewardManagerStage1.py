@@ -449,6 +449,47 @@ class RewardManagerStage1:
         k_ori = DcmmCfg.reward_weights.get("r_orientation_v2", 0.4)
         return k_ori * max(0, cos_theta)
     
+    def check_pregrasp_pose(self, info):
+        """
+        Check if robot has achieved pre-grasp pose suitable for Stage 2 handoff.
+        
+        [NEW 2025-01-04] Pre-grasp pose criteria (does NOT require contact):
+        - d_ee < 0.05m
+        - angle_err < 15° (cos > 0.966)
+        - |v_ee| < 0.05 m/s
+        - 0.7m < d_base < 0.9m
+        
+        Returns:
+            bool: True if pre-grasp pose achieved
+        """
+        # Check EE distance
+        if info["ee_distance"] >= 0.05:
+            return False
+        
+        # Check base distance (should be in optimal window)
+        if not (0.7 < info["base_distance"] < 0.9):
+            return False
+        
+        # Check orientation (alignment within 15°)
+        ee_pos = self.env.Dcmm.data.body("link6").xpos
+        obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos
+        ee_to_obj = obj_pos - ee_pos
+        ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-6)
+        ee_quat = self.env.Dcmm.data.body("link6").xquat
+        palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
+        cos_theta = np.dot(palm_forward, ee_to_obj_norm)
+        if cos_theta < ORIENTATION_THRESHOLD_COS:
+            return False
+        
+        # Check EE velocity (should be low for stable handoff)
+        ee_vel = self.env.Dcmm.data.body("link6").cvel[3:6]
+        ee_speed = np.linalg.norm(ee_vel)
+        if ee_speed >= 0.05:
+            return False
+        
+        # All conditions met!
+        return True
+    
     def _compute_pregrasp_success_bonus(self, info):
         """
         Compute success bonus for achieving pre-grasp pose.
@@ -465,44 +506,30 @@ class RewardManagerStage1:
         Returns:
             float: Success bonus (+50) if pre-grasp achieved, else 0
         """
-        # Check EE distance
-        if info["ee_distance"] >= 0.05:
-            return 0.0
-        
-        # Check base distance (should be in optimal window)
-        if not (0.7 < info["base_distance"] < 0.9):
-            return 0.0
-        
-        # Check orientation (alignment within 15°)
-        ee_pos = self.env.Dcmm.data.body("link6").xpos
-        obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos
-        ee_to_obj = obj_pos - ee_pos
-        ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-6)
-        ee_quat = self.env.Dcmm.data.body("link6").xquat
-        palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
-        cos_theta = np.dot(palm_forward, ee_to_obj_norm)
-        if cos_theta < ORIENTATION_THRESHOLD_COS:
-            return 0.0
-        
-        # Check EE velocity (should be low)
-        ee_vel = self.env.Dcmm.data.body("link6").cvel[3:6]
-        ee_speed = np.linalg.norm(ee_vel)
-        if ee_speed >= 0.05:
-            return 0.0
-        
-        # All conditions met - pre-grasp success!
-        return DcmmCfg.reward_weights.get("r_pregrasp_success", 50.0)
+        if self.check_pregrasp_pose(info):
+            return DcmmCfg.reward_weights.get("r_pregrasp_success", 50.0)
+        return 0.0
     
     def _compute_timeout_penalty(self):
         """
         Compute timeout penalty when episode ends due to time limit.
         
+        The penalty should only be applied once when the episode actually 
+        terminates due to timeout, not on every step after time limit.
+        
         Returns:
-            float: Timeout penalty (-20) if timed out, else 0
+            float: Timeout penalty (-20) if timed out on this step, else 0
         """
-        # Check if this is a timeout termination
+        # Check if this is a timeout termination on this specific step
+        # Only apply penalty if episode is terminating due to timeout
         env_time = self.env.Dcmm.data.time - self.env.start_time
-        if env_time >= self.env.env_time and not self.env.step_touch:
+        
+        # Check if we've exceeded time limit and episode is actually terminating
+        is_timeout = (env_time >= self.env.env_time and 
+                      not self.env.step_touch and 
+                      not getattr(self.env, 'terminated', False))
+        
+        if is_timeout:
             return DcmmCfg.reward_weights.get("r_timeout", -20.0)
         return 0.0
     

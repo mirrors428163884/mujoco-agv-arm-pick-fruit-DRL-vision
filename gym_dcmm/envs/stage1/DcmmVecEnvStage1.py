@@ -574,8 +574,8 @@ class DcmmVecEnvStage1(gym.Env):
                         if self.print_info:
                             print(f"SUCCESS: Stage 1 Pre-grasp achieved! EE distance: {info['ee_distance']:.3f}m")
                 else:
-                    # Lost pre-grasp pose, reset counter (but don't immediately fail)
-                    self.contact_count = max(0, self.contact_count - 1)
+                    # Lost pre-grasp pose, reset counter immediately for clear hysteresis
+                    self.contact_count = 0
                 
                 # Time limit truncation (failure)
                 if info["env_time"] > self.env_time and not truncated:
@@ -595,46 +595,20 @@ class DcmmVecEnvStage1(gym.Env):
         """
         Check if robot has achieved pre-grasp pose suitable for Stage 2 handoff.
         
-        [NEW 2025-01-04] Pre-grasp pose criteria (does NOT require contact):
-        - d_ee < 0.05m
-        - angle_err < 15° (cos > 0.966)
-        - |v_ee| < 0.05 m/s
-        - 0.7m < d_base < 0.9m
-        
+        This environment delegates the actual pre-grasp criteria to the
+        reward manager to avoid duplicating logic and magic numbers. The
+        criteria themselves (e.g., distance, orientation, velocity, and
+        base distance thresholds) are defined in the reward manager.
+
         Returns:
-            bool: True if pre-grasp pose achieved
+            bool: True if pre-grasp pose achieved.
         """
-        from gym_dcmm.utils.quat_utils import quat_rotate_vector
-        
-        # Check EE distance
-        if info["ee_distance"] >= 0.05:
-            return False
-        
-        # Check base distance (should be in optimal window)
-        if not (0.7 < info["base_distance"] < 0.9):
-            return False
-        
-        # Check orientation (alignment within 15°)
-        # ORIENTATION_THRESHOLD_COS = cos(15°) ≈ 0.966
-        ORIENTATION_THRESHOLD_COS = 0.966
-        ee_pos = self.Dcmm.data.body("link6").xpos
-        obj_pos = self.Dcmm.data.body(self.object_name).xpos
-        ee_to_obj = obj_pos - ee_pos
-        ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-6)
-        ee_quat = self.Dcmm.data.body("link6").xquat
-        palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
-        cos_theta = np.dot(palm_forward, ee_to_obj_norm)
-        if cos_theta < ORIENTATION_THRESHOLD_COS:
-            return False
-        
-        # Check EE velocity (should be low for stable handoff)
-        ee_vel = self.Dcmm.data.body("link6").cvel[3:6]
-        ee_speed = np.linalg.norm(ee_vel)
-        if ee_speed >= 0.05:
-            return False
-        
-        # All conditions met!
-        return True
+        # Delegate to the reward manager's implementation to keep a single
+        # source of truth for pre-grasp pose criteria.
+        if hasattr(self, "reward_manager") and hasattr(self.reward_manager, "check_pregrasp_pose"):
+            return self.reward_manager.check_pregrasp_pose(info)
+        # Fallback: if no reward manager is available, behave conservatively.
+        return False
 
     def close(self):
         """Close the environment and cleanup resources."""

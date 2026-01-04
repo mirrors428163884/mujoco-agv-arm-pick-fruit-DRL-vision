@@ -302,7 +302,7 @@ class RewardManagerStage2:
         # ========================================
         # 4. SLIP PENALTY (key for stable grasp)
         # ========================================
-        reward_slip = self._compute_slip_penalty()
+        reward_slip = self._compute_slip_penalty(touch_sensors)
         
         # ========================================
         # 5. IMPACT PENALTY (prevent high-speed contact)
@@ -438,10 +438,21 @@ class RewardManagerStage2:
         Args:
             touch_sensors: Array of 4 touch values [thumb, index, middle, ring]
         """
-        # Force thresholds (in Newtons, typical for finger contact sensors)
-        f_min = 0.1    # Minimum force for "effective contact" (N)
-        f_low = 0.2    # Lower bound of optimal range (N)
-        f_high = 1.5   # Upper bound of optimal range (N)
+        # Force thresholds (in Newtons).
+        # Try to adapt thresholds to the simulated touch sensor configuration
+        # if the environment exposes a maximum touch force; otherwise, fall back
+        # to conservative defaults suitable for relatively sensitive sensors.
+        sensor_force_max = getattr(self.env, "touch_sensor_force_max_n", None)
+        if isinstance(sensor_force_max, (int, float)) and sensor_force_max > 0:
+            # Thresholds expressed as fractions of sensor max force.
+            f_min = 0.02 * sensor_force_max   # Minimum effective contact (~2% of max)
+            f_low = 0.05 * sensor_force_max   # Lower bound of optimal range (~5% of max)
+            f_high = 0.5 * sensor_force_max   # Upper bound of optimal range (~50% of max)
+        else:
+            # Fallback defaults; tune as needed to match actual sensor scaling.
+            f_min = 0.02    # Minimum force for "effective contact" (N)
+            f_low = 0.05    # Lower bound of optimal range (N)
+            f_high = 1.0    # Upper bound of optimal range (N)
         f_mid = (f_low + f_high) / 2
         f_band = (f_high - f_low) / 2
         
@@ -451,11 +462,18 @@ class RewardManagerStage2:
         active_mask = touch_sensors > f_min
         n_contact = np.sum(active_mask)
         
+        # Grasp count weight (used for both single- and multi-finger cases)
+        k_cnt = DcmmCfg.reward_weights.get("r_grasp_count", 1.5)
+        
+        # Provide a small positive reward for establishing initial single-finger contact,
+        # while keeping zero reward when there is no contact at all.
         if n_contact < 2:
+            if n_contact == 1:
+                # Shaping reward for single-finger contact progress toward a full grasp
+                return 0.3 * k_cnt / n_finger
             return 0.0
         
         # 1. Multi-finger count reward: k_cnt * (n_contact / n_finger)
-        k_cnt = DcmmCfg.reward_weights.get("r_grasp_count", 1.5)
         r_cnt = k_cnt * (n_contact / n_finger)
         
         # 2. Force range reward: encourage forces in [f_low, f_high]
@@ -479,14 +497,31 @@ class RewardManagerStage2:
         
         return r_cnt + r_force + r_bal
     
-    def _compute_slip_penalty(self):
+    def _compute_slip_penalty(self, touch_sensors=None):
         """
         Slip penalty: penalize relative velocity between object and hand.
         r_slip = -k_s * |v_rel|
         
         This is critical for learning stable grasp instead of "bump and done".
+        
+        Args:
+            touch_sensors: Optional touch sensor readings to verify contact
         """
         k_s = DcmmCfg.reward_weights.get("r_slip_penalty", 1.0)
+        
+        # Check for meaningful contact using force threshold
+        min_contact_force = 0.02  # Minimum force for meaningful contact
+        has_contact = False
+        
+        if touch_sensors is not None:
+            total_force = np.sum(touch_sensors)
+            has_contact = total_force > min_contact_force
+        elif hasattr(self.env, 'step_touch'):
+            has_contact = self.env.step_touch
+        
+        # Only apply penalty if there's meaningful contact
+        if not has_contact:
+            return 0.0
         
         # Get object velocity
         obj_vel = self.env.Dcmm.data.body(self.env.object_name).cvel[3:6]
@@ -497,11 +532,7 @@ class RewardManagerStage2:
         # Relative velocity
         v_rel = np.linalg.norm(obj_vel - ee_vel)
         
-        # Only apply penalty if there's contact
-        if hasattr(self.env, 'step_touch') and self.env.step_touch:
-            return -k_s * v_rel
-        
-        return 0.0
+        return -k_s * v_rel
     
     def _compute_impact_penalty(self, touch_sensors):
         """

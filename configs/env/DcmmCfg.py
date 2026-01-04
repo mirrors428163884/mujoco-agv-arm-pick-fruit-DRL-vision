@@ -112,11 +112,11 @@ reward_weights = {
     "r_finger_approach": 1.0,
     "r_force_closure": 5.0,
     "r_regularization": 0.05,
-    # [DEPRECATED] Old arm-specific rewards - removed to prevent reward hacking
+    # [DEPRECATED] Old arm-specific rewards - kept for backward compatibility
     "r_arm_reaching": 1.0,          # Reduced, prefer progress-based
     "r_global_reaching": 0.3,       # Reduced
-    "r_arm_motion": 0.0,            # DISABLED - conflicts with smoothness
-    "r_arm_action": 0.0,            # DISABLED - conflicts with smoothness
+    # r_arm_motion and r_arm_action are deprecated and disabled (conflicts with smoothness).
+    # They are no longer used in the reward function but retained here for config compatibility.
     "r_base_ctrl_scale": 0.005,
     "r_arm_ctrl_scale": 0.001,
     "r_action_rate": 0.02,

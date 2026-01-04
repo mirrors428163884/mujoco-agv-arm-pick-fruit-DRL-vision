@@ -128,19 +128,20 @@ class ActorCritic(nn.Module):
             nn.init.orthogonal_(self.hand_head.weight, gain=0.01)
             
             # Separate log_std for arm and hand:
-            # - Arm: -2.5 -> exp(-2.5) ≈ 0.082 std, smaller for more stable/precise arm control
+            # - Arm: -2.5 -> exp(-2.5) ≈ 0.0821 std, smaller for more stable/precise arm control
             #        Arm movements should be smoother and more controlled during grasping
-            # - Hand: -1.5 -> exp(-1.5) ≈ 0.223 std, larger for more exploration in finger control
+            # - Hand: -1.5 -> exp(-1.5) ≈ 0.2231 std, larger for more exploration in finger control
             #         Fingers need more exploration to discover good grasp configurations
             self.sigma_arm = nn.Parameter(
                 torch.full((self.arm_action_dim,), -2.5, dtype=torch.float32), requires_grad=True)
             self.sigma_hand = nn.Parameter(
                 torch.full((self.hand_action_dim,), -1.5, dtype=torch.float32), requires_grad=True)
-        else:
-            self.mu_c = torch.nn.Linear(out_size, actions_num)
-            self.sigma_c = nn.Parameter(
-                torch.full((actions_num,), -2.0, dtype=torch.float32), requires_grad=True)
-            nn.init.orthogonal_(self.mu_c.weight, gain=0.01)
+        
+        # Always initialize mu_c for backward compatibility with old checkpoints
+        self.mu_c = torch.nn.Linear(out_size, actions_num)
+        self.sigma_c = nn.Parameter(
+            torch.full((actions_num,), -2.0, dtype=torch.float32), requires_grad=True)
+        nn.init.orthogonal_(self.mu_c.weight, gain=0.01)
         
         # Legacy tracking head (placeholder)
         self.mu_t = torch.nn.Linear(out_size, actions_num-12)
@@ -217,20 +218,20 @@ class ActorCritic(nn.Module):
         x_c = self.actor_mlp_c(actor_input)
         
         # [NEW 2025-01-04] Separate heads for arm and hand
+        # Stage 2 action layout is always 20D: [base (2D), arm (6D), hand (12D)].
+        # In Stage 2 the base is kept fixed, so we output zeros for the 2 base dims.
+        # This keeps the interface consistent with the full 20D (2+6+12) action space.
         if self.use_separate_heads:
             mu_arm = self.arm_head(x_c)
             mu_hand = self.hand_head(x_c)
-            # Concatenate: [arm (6D), hand (12D)] = 18D
-            # But we need 20D for compatibility (2 base + 6 arm + 12 hand)
-            # Prepend zeros for base (locked in Stage 2)
             mu_base = torch.zeros(x_c.shape[0], 2, device=x_c.device, dtype=x_c.dtype)
             mu = torch.cat([mu_base, mu_arm, mu_hand], dim=-1)
             
-            # Combine sigmas with clamping
+            # Combine sigmas with clamping for the full 20D action: [base, arm, hand]
             sigma_arm_clamped = torch.clamp(self.sigma_arm, self.log_sigma_min, self.log_sigma_max)
             sigma_hand_clamped = torch.clamp(self.sigma_hand, self.log_sigma_min, self.log_sigma_max)
-            # Include base sigma (zeros, since base is locked)
-            sigma_base = torch.zeros(2, device=x_c.device, dtype=x_c.dtype)
+            # Include base log-sigma: use a very small std (exp(-10) ≈ 4.5e-5) to keep base effectively locked
+            sigma_base = torch.full((2,), -10.0, device=x_c.device, dtype=x_c.dtype)
             log_sigma = torch.cat([sigma_base, sigma_arm_clamped, sigma_hand_clamped], dim=0)
             log_sigma = log_sigma.unsqueeze(0).expand(mu.shape[0], -1)
         else:

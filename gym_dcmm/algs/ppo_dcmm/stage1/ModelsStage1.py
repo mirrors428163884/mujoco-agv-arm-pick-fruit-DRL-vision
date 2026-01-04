@@ -77,12 +77,13 @@ class ActorCritic(nn.Module):
     """
     Actor-Critic network for Stage 1 (tracking/approach).
     
-    [UPDATED 2025-01-04] Architecture improvements:
-    1. Separate output heads for base (2D: vx, vyaw) and arm (6D: joint deltas)
-    2. Distance-based gating: arm_action *= sigmoid(a*(1.0 - d_base))
-       - Far: rely more on base
-       - Near: rely more on arm
-    3. Actor also gets visual embedding (small) for obstacle awareness
+    [UPDATED 2025-01-04] Architecture notes:
+    1. Separate output heads for base (2D: vx, vyaw) and arm (6D: joint deltas).
+    
+    Note: Any additional distance-based gating between base and arm actions or
+    environment-specific visual embeddings should be implemented externally
+    (e.g., in the environment or a wrapper), and are not handled inside this
+    network class.
     """
     def __init__(self, kwargs):
         nn.Module.__init__(self)
