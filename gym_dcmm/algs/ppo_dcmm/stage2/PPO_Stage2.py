@@ -24,7 +24,6 @@ class PPO_Stage2(object):
         # This prevents "configuration-level landmine" where Stage2 code paths might
         # incorrectly enable GRU features based on the default config value.
         DcmmCfg.gru_config.enabled = False
-        assert not DcmmCfg.gru_config.enabled, "Stage2 must have gru_config.enabled=False"
         
         self.rank = -1
         self.device = full_config['rl_device']
