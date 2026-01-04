@@ -14,9 +14,14 @@ from gym_dcmm.algs.ppo_dcmm.stage2.ModelsStage2 import ActorCritic
 from gym_dcmm.algs.ppo_dcmm.utils import AverageScalarMeter, RunningMeanStd
 
 from tensorboardX import SummaryWriter
+import configs.env.DcmmCfg as DcmmCfg
 
 class PPO_Stage2(object):
     def __init__(self, env, output_dif, full_config):
+        # [Hard Constraint] Stage2 does NOT use GRU - enforce at config level
+        DcmmCfg.gru_config.enabled = False
+        assert not DcmmCfg.gru_config.enabled, "Stage2 must have gru_config.enabled=False"
+        
         self.rank = -1
         self.device = full_config['rl_device']
         self.network_config = full_config.train.network
@@ -144,7 +149,6 @@ class PPO_Stage2(object):
         # ========================================
         # Two-Phase Training Configuration
         # ========================================
-        import configs.env.DcmmCfg as DcmmCfg
         self.phase1_steps = int(getattr(DcmmCfg.curriculum, 'phase1_steps', 15e6))
         self.phase2_steps = int(getattr(DcmmCfg.curriculum, 'phase2_steps', 10e6))
         self.phase_switch_success_threshold = getattr(DcmmCfg.curriculum, 'phase_switch_success_threshold', 0.30)

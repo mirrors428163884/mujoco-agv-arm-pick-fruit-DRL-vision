@@ -17,6 +17,7 @@ os.environ["IN_MPI"] = "1"  # 防止某些库自动多线程
 import hydra
 import torch
 import random
+import numpy as np
 import wandb
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
@@ -42,7 +43,14 @@ def main(config: DictConfig):
 
     # use the device for rl
     config.rl_device = f'cuda:{config.device_id}' if config.device_id >= 0 else 'cpu'
-    config.seed = random.seed(config.seed)
+    
+    # [Fix] Properly set seed (random.seed() returns None, so we need separate calls)
+    if config.seed == -1:
+        config.seed = random.randint(0, 2**31 - 1)
+    random.seed(config.seed)
+    np.random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    torch.cuda.manual_seed_all(config.seed)
 
     cprint('Start Building the Environment (Stage 2 Catch)', 'green', attrs=['bold'])
     # Create and wrap the environment
@@ -54,7 +62,7 @@ def main(config: DictConfig):
         config.num_envs = 1
 
     if config.num_envs > 32:
-        cprint(f"Warning: config.num_envs {config.num_envs} is too large for the available CPU cores. Capping at 12.", 'yellow')
+        cprint(f"Warning: config.num_envs {config.num_envs} is too large for the available CPU cores. Capping at 32.", 'yellow')
         config.num_envs = 32
         
     print("config.num_envs: ", config.num_envs)
