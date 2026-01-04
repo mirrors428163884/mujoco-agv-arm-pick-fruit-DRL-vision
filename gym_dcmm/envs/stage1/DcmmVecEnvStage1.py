@@ -418,6 +418,9 @@ class DcmmVecEnvStage1(gym.Env):
         
         # Reset observation noise state for domain randomization
         self.obs_manager.reset_noise_state()
+        
+        # [NEW 2025-01-04] Reset progress tracking for new episode
+        self.reward_manager.reset_progress_tracking()
 
         self.info = {
             "ee_distance": np.linalg.norm(self.Dcmm.data.body("link6").xpos -
@@ -548,26 +551,31 @@ class DcmmVecEnvStage1(gym.Env):
                 else:
                     truncated = False
             elif self.task == "Tracking":
-                # [Fix 2025-12-20] Success condition aligned with Stage 2 handoff:
-                # - Palm must touch target (step_touch)
-                # - EE must be within distance_thresh (0.25m) to ensure good starting position for Stage 2
-                # - Contact must be sustained for 10 steps
-                info['is_success'] = False  # Default to failure
-                ee_close_enough = info["ee_distance"] < DcmmCfg.distance_thresh
+                # [REFACTORED 2025-01-04] Pre-grasp pose success criteria
+                # Success is based on POSE, NOT contact - this prevents hard collision incentive
+                # Pre-grasp conditions (with hysteresis):
+                # - d_ee < 0.05m
+                # - angle_err < 15° (cos > 0.966)
+                # - |v_ee| < 0.05 m/s  
+                # - 0.7m < d_base < 0.9m
+                # - Must maintain for 5-10 consecutive steps (hysteresis)
                 
-                if self.step_touch and ee_close_enough:
+                info['is_success'] = False  # Default to failure
+                truncated = False
+                
+                # Check pre-grasp pose conditions
+                pregrasp_achieved = self._check_pregrasp_pose(info)
+                
+                if pregrasp_achieved:
                     self.contact_count += 1
-                    if self.contact_count >= 10:
+                    if self.contact_count >= 5:  # Hysteresis: 5 consecutive steps
                         truncated = True
                         info['is_success'] = True  # Mark as success for Stage 2 handoff
                         if self.print_info:
-                            print(f"SUCCESS: Stage 1 Tracking complete! EE distance: {info['ee_distance']:.3f}m")
-                    else:
-                        truncated = False
+                            print(f"SUCCESS: Stage 1 Pre-grasp achieved! EE distance: {info['ee_distance']:.3f}m")
                 else:
-                    # Lost contact or moved too far, reset counter
+                    # Lost pre-grasp pose, reset counter immediately for clear hysteresis
                     self.contact_count = 0
-                    truncated = False
                 
                 # Time limit truncation (failure)
                 if info["env_time"] > self.env_time and not truncated:
@@ -582,6 +590,25 @@ class DcmmVecEnvStage1(gym.Env):
             import traceback
             traceback.print_exc()
             raise e
+    
+    def _check_pregrasp_pose(self, info):
+        """
+        Check if robot has achieved pre-grasp pose suitable for Stage 2 handoff.
+        
+        This environment delegates the actual pre-grasp criteria to the
+        reward manager to avoid duplicating logic and magic numbers. The
+        criteria themselves (e.g., distance, orientation, velocity, and
+        base distance thresholds) are defined in the reward manager.
+
+        Returns:
+            bool: True if pre-grasp pose achieved.
+        """
+        # Delegate to the reward manager's implementation to keep a single
+        # source of truth for pre-grasp pose criteria.
+        if hasattr(self, "reward_manager") and hasattr(self.reward_manager, "check_pregrasp_pose"):
+            return self.reward_manager.check_pregrasp_pose(info)
+        # Fallback: if no reward manager is available, behave conservatively.
+        return False
 
     def close(self):
         """Close the environment and cleanup resources."""

@@ -2,32 +2,36 @@
 Reward Manager for Stage 1 (Tracking Task).
 
 This module handles all reward computation for the mobile manipulation tracking task.
-The agent learns to move the mobile base and arm to touch a target fruit with the palm.
+The agent learns to move the mobile base and arm to approach a target fruit and achieve
+a "pre-grasp" pose suitable for Stage 2 handoff.
 
-Key Design Decisions (2025-12-19 Fix):
-1. Decoupled reaching reward into base and arm components to prevent base-only solutions
-2. Added explicit arm motion reward to encourage arm joint movement
-3. Reduced control regularization to allow more aggressive arm movements
+Key Design Decisions (2025-01-04 Major Refactor):
+Based on the issue requirements, this implements a "Progress + Terminal + Regularization"
+three-stage reward structure to eliminate reward hacking and "站桩刷分" behavior.
 
-Reward Components:
-- Arm Reaching: EE-to-target distance in base frame (arm contribution only)
-- Global Reaching: EE-to-target distance in world frame (base + arm)
-- Base Approach: Encourage optimal base distance (~0.8m)
-- Arm Motion: Reward arm joint deviation from initial pose
-- Arm Action: Reward arm action magnitude
-- Orientation: Palm facing target
-- Touch: Contact reward with gentle impact bonus
-- Regularization: Control smoothness penalty
-- Collision: Termination penalty for crashes
-- Plant Collision: Stem and leaf collision penalties
-- Action Rate: Smooth action changes
-- AVP: Asymmetric Value Propagation from Stage 2 Critic (optional)
+NEW Reward Structure:
+1. Progress-based Rewards (replace absolute distance rewards):
+   - EE Progress: k_ee * (d_ee_prev - d_ee_curr), clipped to [-0.2, 0.2]
+   - Base Progress: k_base * (d_base_prev - d_base_curr), clipped to [-0.2, 0.2]
+   
+2. Regularization Penalties:
+   - Alive Penalty: -0.01 per step to prevent stalling
+   - Stagnation Penalty: -0.1 if EE distance doesn't decrease for N steps
+   - Action Smoothness: Penalize rapid action changes
+   
+3. Terminal Rewards:
+   - Success: +50 for achieving pre-grasp pose (NOT requiring contact)
+   - Collision: -50 (strong penalty)
+   - Timeout: -20
+   
+4. Conditional Rewards:
+   - Orientation: Cosine-based, only active when d_ee < 0.30m
+   - Distance gating for arm vs base emphasis
 
-New Reward Components (2025-12-20 Completeness Analysis):
-- Joint Limit Penalty: Soft constraint when joints approach limits (safety)
-- Base Heading: Reward for base facing toward target
-- Precision: Gaussian reward when EE is within 0.3m of target
-- Contact Persistence: Incremental reward for sustained contact
+Removed/Modified:
+- Removed arm motion magnitude rewards (conflicts with smoothness)
+- Removed absolute distance rewards (replaced with progress)
+- Contact is NO LONGER required for success (prevents hard collision incentive)
 """
 
 import numpy as np
@@ -39,6 +43,9 @@ from gym_dcmm.utils.quat_utils import quat_rotate_vector, quat_to_euler, angle_d
 # AVP Imports (only used when AVP is enabled)
 from gym_dcmm.algs.ppo_dcmm.stage2.ModelsStage2 import ActorCritic as CriticStage2
 from gym_dcmm.algs.ppo_dcmm.utils import RunningMeanStd
+
+# Constants for success criteria
+ORIENTATION_THRESHOLD_COS = 0.966  # cos(15°) - orientation alignment threshold
 
 
 class RewardManagerStage1:
@@ -65,6 +72,15 @@ class RewardManagerStage1:
         self.env = env
         self.prev_action_reward = None
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        
+        # [NEW 2025-01-04] Progress-based reward tracking
+        self.prev_ee_distance = None
+        self.prev_base_distance = None
+        
+        # [NEW 2025-01-04] Stagnation detection
+        self.stagnation_counter = 0
+        self.stagnation_threshold = 10  # N steps without progress triggers penalty
+        self.min_progress_threshold = 0.001  # Minimum distance change to count as progress
         
         # Initialize reward statistics
         self._init_reward_stats()
@@ -175,6 +191,9 @@ class RewardManagerStage1:
     def compute_reward(self, obs, info, ctrl):
         """
         Compute total reward for the current step.
+        
+        [REFACTORED 2025-01-04] New "Progress + Terminal + Regularization" structure
+        to eliminate reward hacking and "站桩刷分" behavior.
 
         Args:
             obs: Current observation dict
@@ -184,54 +203,75 @@ class RewardManagerStage1:
         Returns:
             float: Total reward value
         """
-        # Compute individual reward components
-        r_arm_reaching, arm_reach_dist = self._compute_arm_reaching_reward()
-        r_reaching = self._compute_global_reaching_reward(info)
-        r_base_approach = self._compute_base_approach_reward(info)
-        r_arm_motion, arm_joint_dev = self._compute_arm_motion_reward()
-        r_arm_action = self._compute_arm_action_reward(ctrl)
-        r_orientation = self._compute_orientation_reward(info)
-        r_touch, r_impact = self._compute_touch_reward()
-        r_regularization = self._compute_regularization_penalty(ctrl)
-        r_collision = self._compute_collision_penalty()
-        r_plant_collision = self._compute_plant_collision_penalty()
+        # ========================================
+        # 1. PROGRESS-BASED REWARDS (replace absolute distance)
+        # ========================================
+        r_ee_progress = self._compute_ee_progress_reward(info)
+        r_base_progress = self._compute_base_progress_reward(info)
+        
+        # ========================================
+        # 2. REGULARIZATION / PENALTIES
+        # ========================================
+        r_alive = self._compute_alive_penalty()  # Per-step time penalty
+        r_stagnation = self._compute_stagnation_penalty(info)  # Penalize no progress
         r_action_rate = self._compute_action_rate_penalty(ctrl)
+        r_regularization = self._compute_regularization_penalty(ctrl)
+        r_joint_limit = self._compute_joint_limit_penalty()
+        r_plant_collision = self._compute_plant_collision_penalty()
+        
+        # ========================================
+        # 3. CONDITIONAL REWARDS (gated by distance)
+        # ========================================
+        r_orientation = self._compute_orientation_reward_v2(info)  # Only when d_ee < 0.30m
+        r_base_heading = self._compute_base_heading_reward(info)
+        
+        # ========================================
+        # 4. TERMINAL REWARDS
+        # ========================================
+        r_collision = self._compute_collision_penalty()  # -50 for collision
+        r_timeout = self._compute_timeout_penalty()  # -20 for timeout
+        r_success = self._compute_pregrasp_success_bonus(info)  # +50 for pre-grasp achieved
+        
+        # ========================================
+        # 5. OPTIONAL: AVP (if enabled)
+        # ========================================
         r_avp = self.compute_avp_reward(obs, info)
         
-        # [NEW 2025-12-20] Success bonus for task completion
-        r_success = self._compute_success_bonus()
+        # ========================================
+        # Legacy rewards (kept for transition, reduced weight)
+        # ========================================
+        # Touch reward: still useful but not required for success
+        r_touch, r_impact = self._compute_touch_reward()
         
-        # [NEW 2025-12-20] Additional reward components from completeness analysis
-        r_joint_limit = self._compute_joint_limit_penalty()
-        r_base_heading = self._compute_base_heading_reward(info)
-        r_precision = self._compute_precision_reward(info)
-        r_contact_persistence = self._compute_contact_persistence_reward()
-
         # Sum all rewards
         total_reward = (
-            r_arm_reaching + r_reaching + r_base_approach +
-            r_arm_motion + r_arm_action + r_orientation +
-            r_touch + r_regularization + r_collision +
-            r_plant_collision + r_action_rate + r_avp + r_success +
-            r_joint_limit + r_base_heading + r_precision + r_contact_persistence
+            # Progress rewards (main learning signal)
+            r_ee_progress + r_base_progress +
+            # Regularization (behavior shaping)
+            r_alive + r_stagnation + r_action_rate + r_regularization + r_joint_limit +
+            # Conditional rewards
+            r_orientation + r_base_heading +
+            # Collision penalties
+            r_collision + r_plant_collision + r_timeout +
+            # Success/failure
+            r_success +
+            # Optional
+            r_avp + r_touch
         )
 
-        # Update statistics
-        self._update_reward_stats(
-            r_reaching, r_base_approach, r_orientation, r_touch,
-            r_collision, r_plant_collision, r_arm_reaching, r_arm_motion,
-            arm_reach_dist, info, r_joint_limit, r_base_heading, r_precision,
-            r_contact_persistence
+        # Update statistics for logging
+        self._update_reward_stats_v2(
+            info, r_ee_progress, r_base_progress, r_alive, r_stagnation,
+            r_orientation, r_collision, r_success, r_touch
         )
 
         # Debug output
         if self.env.print_reward:
-            self._print_reward_breakdown(
-                r_reaching, r_arm_reaching, r_arm_motion, r_arm_action,
-                r_base_approach, r_orientation, r_touch, r_impact,
-                r_regularization, r_collision, r_plant_collision,
-                r_action_rate, r_avp, arm_reach_dist, arm_joint_dev, total_reward,
-                r_joint_limit, r_base_heading, r_precision, r_contact_persistence
+            self._print_reward_breakdown_v2(
+                r_ee_progress, r_base_progress, r_alive, r_stagnation,
+                r_orientation, r_base_heading, r_touch, r_collision,
+                r_plant_collision, r_action_rate, r_avp, r_success,
+                r_timeout, info, total_reward
             )
 
         return total_reward
@@ -240,8 +280,8 @@ class RewardManagerStage1:
         """
         Compute success bonus when task is successfully completed.
         
-        [NEW 2025-12-20] Added to make task completion more attractive than
-        accumulating dense rewards through "kamikaze" behavior.
+        [DEPRECATED 2025-01-04] This old version required contact.
+        Use _compute_pregrasp_success_bonus instead.
         
         Returns:
             float: Success bonus (r_success) if contact_count >= 10, else 0
@@ -251,6 +291,253 @@ class RewardManagerStage1:
         if self.env.contact_count >= 10:
             return DcmmCfg.reward_weights.get("r_success", 50.0)
         return 0.0
+
+    # ========================================
+    # NEW Progress-Based Reward Components (2025-01-04)
+    # ========================================
+    
+    def _compute_ee_progress_reward(self, info):
+        """
+        Compute EE progress reward: reward for getting closer to target.
+        
+        Formula: r_ee = k_ee * (d_ee_prev - d_ee_curr), clipped to [-0.2, 0.2]
+        
+        Where:
+        - d_ee_prev: EE-to-target distance at previous timestep
+        - d_ee_curr: EE-to-target distance at current timestep
+        - Positive reward when getting closer (d_ee_prev > d_ee_curr)
+        
+        This replaces absolute distance rewards with progress-based rewards
+        to prevent "站桩刷分" (standing still to farm rewards).
+        
+        Args:
+            info: Environment info containing ee_distance
+            
+        Returns:
+            float: Progress reward value
+        """
+        current_dist = info["ee_distance"]
+        
+        # Initialize previous distance on first call
+        if self.prev_ee_distance is None:
+            self.prev_ee_distance = current_dist
+            return 0.0
+        
+        # Compute progress (positive if getting closer)
+        progress = self.prev_ee_distance - current_dist
+        
+        # Apply weight and clip
+        k_ee = DcmmCfg.reward_weights.get("r_ee_progress", 3.0)
+        reward = k_ee * progress
+        reward = np.clip(reward, -0.2, 0.2)
+        
+        # Update previous distance
+        self.prev_ee_distance = current_dist
+        
+        return reward
+    
+    def _compute_base_progress_reward(self, info):
+        """
+        Compute base progress reward: reward for base approaching optimal distance.
+        
+        The base should approach an optimal distance (0.7-0.9m) from target,
+        not necessarily get as close as possible.
+        
+        Args:
+            info: Environment info containing base_distance
+            
+        Returns:
+            float: Progress reward value
+        """
+        current_dist = info["base_distance"]
+        optimal_dist = 0.8  # Optimal base distance
+        
+        # Initialize previous distance on first call
+        if self.prev_base_distance is None:
+            self.prev_base_distance = current_dist
+            return 0.0
+        
+        # Compute progress toward optimal distance
+        prev_error = abs(self.prev_base_distance - optimal_dist)
+        curr_error = abs(current_dist - optimal_dist)
+        progress = prev_error - curr_error  # Positive if error decreased
+        
+        # Apply weight and clip
+        k_base = DcmmCfg.reward_weights.get("r_base_progress", 2.0)
+        reward = k_base * progress
+        reward = np.clip(reward, -0.2, 0.2)
+        
+        # Update previous distance
+        self.prev_base_distance = current_dist
+        
+        return reward
+    
+    def _compute_alive_penalty(self):
+        """
+        Compute per-step time penalty to discourage stalling.
+        
+        This prevents the agent from staying still to avoid negative rewards.
+        
+        Returns:
+            float: Negative penalty value (-0.01 to -0.02 per step)
+        """
+        return DcmmCfg.reward_weights.get("r_alive_penalty", -0.01)
+    
+    def _compute_stagnation_penalty(self, info):
+        """
+        Compute stagnation penalty: penalize if EE hasn't made progress for N steps.
+        
+        If the agent is stuck (EE distance not decreasing), apply additional penalty.
+        
+        Args:
+            info: Environment info containing ee_distance
+            
+        Returns:
+            float: Stagnation penalty (-0.1 if stagnating, 0 otherwise)
+        """
+        current_dist = info["ee_distance"]
+        
+        if self.prev_ee_distance is not None:
+            # Check if making progress
+            progress = self.prev_ee_distance - current_dist
+            if progress < self.min_progress_threshold:
+                self.stagnation_counter += 1
+            else:
+                self.stagnation_counter = 0
+        
+        # Apply penalty if stagnating for too long
+        if self.stagnation_counter >= self.stagnation_threshold:
+            return DcmmCfg.reward_weights.get("r_stagnation_penalty", -0.1)
+        
+        return 0.0
+    
+    def _compute_orientation_reward_v2(self, info):
+        """
+        Compute orientation reward using cosine similarity, ONLY when close.
+        
+        [NEW 2025-01-04] Key changes:
+        1. Only active when d_ee < 0.30m (prevents spinning at long range)
+        2. Uses continuous cosine function instead of power scaling
+        3. r_ori = k_ori * max(0, cos(theta))
+        
+        Args:
+            info: Environment info containing ee_distance
+            
+        Returns:
+            float: Orientation reward value
+        """
+        # Gate: only compute when EE is close
+        gate_distance = DcmmCfg.reward_weights.get("r_orientation_gate", 0.30)
+        if info["ee_distance"] >= gate_distance:
+            return 0.0
+        
+        ee_pos = self.env.Dcmm.data.body("link6").xpos
+        obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos
+        
+        # Direction from EE to object
+        ee_to_obj = obj_pos - ee_pos
+        ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-6)
+        
+        # Palm forward direction (negative Z-axis of EE frame)
+        ee_quat = self.env.Dcmm.data.body("link6").xquat
+        palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
+        
+        # Cosine alignment: 1.0 = perfect, -1.0 = backwards
+        cos_theta = np.dot(palm_forward, ee_to_obj_norm)
+        
+        # Apply continuous reward: k_ori * max(0, cos_theta)
+        k_ori = DcmmCfg.reward_weights.get("r_orientation_v2", 0.4)
+        return k_ori * max(0, cos_theta)
+    
+    def check_pregrasp_pose(self, info):
+        """
+        Check if robot has achieved pre-grasp pose suitable for Stage 2 handoff.
+        
+        [NEW 2025-01-04] Pre-grasp pose criteria (does NOT require contact):
+        - d_ee < 0.05m
+        - angle_err < 15° (cos > 0.966)
+        - |v_ee| < 0.05 m/s
+        - 0.7m < d_base < 0.9m
+        
+        Returns:
+            bool: True if pre-grasp pose achieved
+        """
+        # Check EE distance
+        if info["ee_distance"] >= 0.05:
+            return False
+        
+        # Check base distance (should be in optimal window)
+        if not (0.7 < info["base_distance"] < 0.9):
+            return False
+        
+        # Check orientation (alignment within 15°)
+        ee_pos = self.env.Dcmm.data.body("link6").xpos
+        obj_pos = self.env.Dcmm.data.body(self.env.object_name).xpos
+        ee_to_obj = obj_pos - ee_pos
+        ee_to_obj_norm = ee_to_obj / (np.linalg.norm(ee_to_obj) + 1e-6)
+        ee_quat = self.env.Dcmm.data.body("link6").xquat
+        palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
+        cos_theta = np.dot(palm_forward, ee_to_obj_norm)
+        if cos_theta < ORIENTATION_THRESHOLD_COS:
+            return False
+        
+        # Check EE velocity (should be low for stable handoff)
+        ee_vel = self.env.Dcmm.data.body("link6").cvel[3:6]
+        ee_speed = np.linalg.norm(ee_vel)
+        if ee_speed >= 0.05:
+            return False
+        
+        # All conditions met!
+        return True
+    
+    def _compute_pregrasp_success_bonus(self, info):
+        """
+        Compute success bonus for achieving pre-grasp pose.
+        
+        [NEW 2025-01-04] Success is based on POSE, NOT contact.
+        This prevents the agent from incentivizing hard collisions.
+        
+        Pre-grasp conditions:
+        - d_ee < 0.05m
+        - angle_err < 15° (cos > 0.966)
+        - |v_ee| < 0.05 m/s
+        - 0.7m < d_base < 0.9m
+        
+        Returns:
+            float: Success bonus (+50) if pre-grasp achieved, else 0
+        """
+        if self.check_pregrasp_pose(info):
+            return DcmmCfg.reward_weights.get("r_pregrasp_success", 50.0)
+        return 0.0
+    
+    def _compute_timeout_penalty(self):
+        """
+        Compute timeout penalty when episode ends due to time limit.
+        
+        The penalty should only be applied once when the episode actually 
+        terminates due to timeout, not on every step after time limit.
+        
+        Returns:
+            float: Timeout penalty (-20) if timed out on this step, else 0
+        """
+        # Check if this is a timeout termination on this specific step
+        # Only apply penalty if episode is terminating due to timeout
+        env_time = self.env.Dcmm.data.time - self.env.start_time
+        
+        # Check if we've exceeded time limit and episode is actually terminating
+        is_timeout = (env_time >= self.env.env_time and 
+                      not self.env.step_touch and 
+                      not getattr(self.env, 'terminated', False))
+        
+        if is_timeout:
+            return DcmmCfg.reward_weights.get("r_timeout", -20.0)
+        return 0.0
+    
+    def reset_progress_tracking(self):
+        """Reset progress tracking variables for new episode."""
+        self.prev_ee_distance = None
+        self.prev_base_distance = None
+        self.stagnation_counter = 0
 
     # ========================================
     # Individual Reward Components
@@ -663,31 +950,56 @@ class RewardManagerStage1:
     def _init_reward_stats(self):
         """Initialize reward statistics for WandB logging."""
         self.reward_stats = {
-            'reaching_sum': 0.0,
-            'base_approach_sum': 0.0,
+            # New progress-based rewards (2025-01-04)
+            'ee_progress_sum': 0.0,
+            'base_progress_sum': 0.0,
+            'alive_penalty_sum': 0.0,
+            'stagnation_penalty_sum': 0.0,
+            # Conditional rewards
             'orientation_sum': 0.0,
-            'touch_sum': 0.0,
+            'base_heading_sum': 0.0,
+            # Terminal rewards
             'collision_sum': 0.0,
-            'plant_collision_sum': 0.0,
+            'success_sum': 0.0,
+            'touch_sum': 0.0,
+            # Distance tracking
             'ee_distance_sum': 0.0,
             'base_distance_sum': 0.0,
+            # Legacy (kept for comparison)
+            'reaching_sum': 0.0,
+            'base_approach_sum': 0.0,
+            'plant_collision_sum': 0.0,
             'arm_reaching_sum': 0.0,
             'arm_motion_sum': 0.0,
             'arm_reach_distance_sum': 0.0,
-            # [NEW 2025-12-20] Additional reward stats
             'joint_limit_sum': 0.0,
-            'base_heading_sum': 0.0,
             'precision_sum': 0.0,
             'contact_persistence_sum': 0.0,
             'count': 0,
         }
+    
+    def _update_reward_stats_v2(self, info, r_ee_progress, r_base_progress,
+                                r_alive, r_stagnation, r_orientation,
+                                r_collision, r_success, r_touch):
+        """Update running statistics for new reward structure logging."""
+        self.reward_stats['ee_progress_sum'] += r_ee_progress
+        self.reward_stats['base_progress_sum'] += r_base_progress
+        self.reward_stats['alive_penalty_sum'] += r_alive
+        self.reward_stats['stagnation_penalty_sum'] += r_stagnation
+        self.reward_stats['orientation_sum'] += r_orientation
+        self.reward_stats['collision_sum'] += r_collision
+        self.reward_stats['success_sum'] += r_success
+        self.reward_stats['touch_sum'] += r_touch
+        self.reward_stats['ee_distance_sum'] += info["ee_distance"]
+        self.reward_stats['base_distance_sum'] += info["base_distance"]
+        self.reward_stats['count'] += 1
     
     def _update_reward_stats(self, r_reaching, r_base_approach, r_orientation,
                              r_touch, r_collision, r_plant_collision,
                              r_arm_reaching, r_arm_motion, arm_reach_dist, info,
                              r_joint_limit=0.0, r_base_heading=0.0,
                              r_precision=0.0, r_contact_persistence=0.0):
-        """Update running statistics for logging."""
+        """Update running statistics for logging (legacy version)."""
         self.reward_stats['reaching_sum'] += r_reaching
         self.reward_stats['base_approach_sum'] += r_base_approach
         self.reward_stats['orientation_sum'] += r_orientation
@@ -718,22 +1030,31 @@ class RewardManagerStage1:
         
         count = self.reward_stats['count']
         stats = {
+            # New progress-based rewards
+            'rewards/ee_progress_mean': self.reward_stats['ee_progress_sum'] / count,
+            'rewards/base_progress_mean': self.reward_stats['base_progress_sum'] / count,
+            'rewards/alive_penalty_mean': self.reward_stats['alive_penalty_sum'] / count,
+            'rewards/stagnation_penalty_mean': self.reward_stats['stagnation_penalty_sum'] / count,
+            # Conditional/terminal
+            'rewards/orientation_mean': self.reward_stats['orientation_sum'] / count,
+            'rewards/collision_mean': self.reward_stats['collision_sum'] / count,
+            'rewards/success_mean': self.reward_stats['success_sum'] / count,
+            'rewards/touch_mean': self.reward_stats['touch_sum'] / count,
+            # Legacy (for comparison)
             'rewards/reaching_mean': self.reward_stats['reaching_sum'] / count,
             'rewards/base_approach_mean': self.reward_stats['base_approach_sum'] / count,
-            'rewards/orientation_mean': self.reward_stats['orientation_sum'] / count,
-            'rewards/touch_mean': self.reward_stats['touch_sum'] / count,
-            'rewards/collision_mean': self.reward_stats['collision_sum'] / count,
             'rewards/plant_collision_mean': self.reward_stats['plant_collision_sum'] / count,
             'rewards/arm_reaching_mean': self.reward_stats['arm_reaching_sum'] / count,
             'rewards/arm_motion_mean': self.reward_stats['arm_motion_sum'] / count,
-            # [NEW 2025-12-20] Additional reward stats
             'rewards/joint_limit_mean': self.reward_stats['joint_limit_sum'] / count,
             'rewards/base_heading_mean': self.reward_stats['base_heading_sum'] / count,
             'rewards/precision_mean': self.reward_stats['precision_sum'] / count,
             'rewards/contact_persistence_mean': self.reward_stats['contact_persistence_sum'] / count,
+            # Distances
             'distance/ee_distance_mean': self.reward_stats['ee_distance_sum'] / count,
             'distance/base_distance_mean': self.reward_stats['base_distance_sum'] / count,
             'distance/arm_reach_distance_mean': self.reward_stats['arm_reach_distance_sum'] / count,
+            # Curriculum
             'curriculum/difficulty': self.env.curriculum_difficulty,
             'curriculum/w_stem': self.env.current_w_stem,
             'curriculum/orient_power': self.env.current_orient_power,
@@ -777,7 +1098,7 @@ class RewardManagerStage1:
                                 arm_reach_dist, arm_joint_dev, total,
                                 r_joint_limit=0.0, r_base_heading=0.0,
                                 r_precision=0.0, r_contact_persistence=0.0):
-        """Print detailed reward breakdown for debugging."""
+        """Print detailed reward breakdown for debugging (legacy version)."""
         print(f"reward_reaching: {r_reaching:.3f}")
         print(f"reward_arm_reaching: {r_arm_reaching:.3f}")
         print(f"reward_arm_motion: {r_arm_motion:.3f}")
@@ -798,6 +1119,41 @@ class RewardManagerStage1:
         print(f"arm_reach_distance: {arm_reach_dist:.3f}")
         print(f"arm_joint_deviation: {arm_joint_dev:.3f}")
         print(f"total reward: {total:.3f}\n")
+
+    def _print_reward_breakdown_v2(self, r_ee_progress, r_base_progress,
+                                   r_alive, r_stagnation, r_orientation,
+                                   r_base_heading, r_touch, r_collision,
+                                   r_plant_collision, r_action_rate, r_avp,
+                                   r_success, r_timeout, info, total):
+        """Print detailed reward breakdown for debugging (new progress-based version)."""
+        print("=" * 50)
+        print("REWARD BREAKDOWN (Progress-Based)")
+        print("=" * 50)
+        print(f"[PROGRESS]")
+        print(f"  EE Progress:      {r_ee_progress:>8.4f}")
+        print(f"  Base Progress:    {r_base_progress:>8.4f}")
+        print(f"[PENALTIES]")
+        print(f"  Alive Penalty:    {r_alive:>8.4f}")
+        print(f"  Stagnation:       {r_stagnation:>8.4f}")
+        print(f"  Action Rate:      {r_action_rate:>8.4f}")
+        print(f"  Plant Collision:  {r_plant_collision:>8.4f}")
+        print(f"[CONDITIONAL]")
+        print(f"  Orientation:      {r_orientation:>8.4f}")
+        print(f"  Base Heading:     {r_base_heading:>8.4f}")
+        print(f"[TERMINAL]")
+        print(f"  Collision:        {r_collision:>8.4f}")
+        print(f"  Timeout:          {r_timeout:>8.4f}")
+        print(f"  Success:          {r_success:>8.4f}")
+        print(f"[OPTIONAL]")
+        print(f"  Touch:            {r_touch:>8.4f}")
+        print(f"  AVP:              {r_avp:>8.4f}")
+        print("-" * 50)
+        print(f"[DISTANCES]")
+        print(f"  EE Distance:      {info['ee_distance']:>8.4f} m")
+        print(f"  Base Distance:    {info['base_distance']:>8.4f} m")
+        print("=" * 50)
+        print(f"TOTAL REWARD:       {total:>8.4f}")
+        print("=" * 50 + "\n")
 
     # ========================================
     # Legacy Methods (for compatibility)

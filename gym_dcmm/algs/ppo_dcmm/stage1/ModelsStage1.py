@@ -28,12 +28,17 @@ class MLP(nn.Module):
          enumerate(mod for mod in sequential if isinstance(mod, nn.Linear))]
 
 class CNNBase(nn.Module):
+    """
+    CNN feature extractor for depth images.
+    
+    [UPDATED 2025-01-04] Added AdaptiveAvgPool2d to handle variable image dimensions.
+    This ensures that changing img_dim (84/128/224) won't cause dimension explosions.
+    """
     def __init__(self, input_shape, hidden_size=256):
         super(CNNBase, self).__init__()
         # Input shape is (C, H, W)
-        # Assuming input is depth image (1, 224, 224)
         
-        self.main = nn.Sequential(
+        self.conv_layers = nn.Sequential(
             # Layer 1
             nn.Conv2d(input_shape[0], 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
@@ -48,39 +53,54 @@ class CNNBase(nn.Module):
             nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            
-            nn.Flatten(),
         )
         
-        # Compute output size
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, *input_shape)
-            output = self.main(dummy_input)
-            self.cnn_output_size = output.shape[1]
-            
+        # [NEW 2025-01-04] AdaptiveAvgPool ensures fixed output size regardless of input resolution
+        # Output will always be (64, 4, 4) = 1024 features
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 4))
+        
+        # Fixed CNN output size: 64 channels * 4 * 4 = 1024
+        self.cnn_output_size = 64 * 4 * 4
+        
         self.linear = nn.Linear(self.cnn_output_size, hidden_size)
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        x = self.main(x)
+        x = self.conv_layers(x)
+        x = self.adaptive_pool(x)  # Ensure fixed size
+        x = x.flatten(1)  # Flatten to (batch, features)
         x = self.linear(x)
         x = self.relu(x)
         return x
 
 class ActorCritic(nn.Module):
+    """
+    Actor-Critic network for Stage 1 (tracking/approach).
+    
+    [UPDATED 2025-01-04] Architecture notes:
+    1. Separate output heads for base (2D: vx, vyaw) and arm (6D: joint deltas).
+    
+    Note: Any additional distance-based gating between base and arm actions or
+    environment-specific visual embeddings should be implemented externally
+    (e.g., in the environment or a wrapper), and are not handled inside this
+    network class.
+    """
     def __init__(self, kwargs):
         nn.Module.__init__(self)
         separate_value_mlp = kwargs.pop('separate_value_mlp')
         self.separate_value_mlp = separate_value_mlp
 
         actions_num = kwargs.pop('actions_num')
-        input_shape = kwargs.pop('input_shape') # This is now a dict or tuple?
-        # We expect input_shape to be a dict with 'vector' and 'image' keys, or we handle it in forward
-        # For now, let's assume input_shape passed here is the vector shape, and we hardcode/config the image shape
+        input_shape = kwargs.pop('input_shape')
         
         self.units = kwargs.pop('actor_units')
         
         self.use_vision = kwargs.get('use_vision', True)
+        
+        # [NEW 2025-01-04] Separate heads configuration
+        self.use_separate_heads = kwargs.get('use_separate_heads', True)
+        self.base_action_dim = 2  # vx, vyaw
+        self.arm_action_dim = 6   # joint deltas
         
         # GRU configuration
         self.use_gru = kwargs.get('use_gru', DcmmCfg.gru_config.enabled)
@@ -101,9 +121,14 @@ class ActorCritic(nn.Module):
         if self.use_vision:
             self.cnn = CNNBase(img_input_shape, hidden_size=256)
             combined_input_size = mlp_input_shape + 256
+            # Actor currently does not consume visual features; keep its input
+            # size equal to the vector MLP input size to avoid dead code and
+            # inconsistent dimension accounting.
+            actor_input_size = mlp_input_shape
         else:
             self.cnn = None
             combined_input_size = mlp_input_shape
+            actor_input_size = mlp_input_shape
         
         # GRU Layer (before MLP)
         if self.use_gru:
@@ -128,16 +153,33 @@ class ActorCritic(nn.Module):
         
         out_size = self.units[-1]
 
+        # Actor MLP (shared features)
         self.actor_mlp = MLP(units=self.units, input_size=mlp_input_size)
+        
+        # [NEW 2025-01-04] Separate output heads for base and arm
+        if self.use_separate_heads:
+            self.base_head = nn.Linear(out_size, self.base_action_dim)
+            self.arm_head = nn.Linear(out_size, self.arm_action_dim)
+            # Initialize with small weights
+            nn.init.orthogonal_(self.base_head.weight, gain=0.01)
+            nn.init.orthogonal_(self.arm_head.weight, gain=0.01)
+            # Separate log_std for base and arm
+            self.sigma_base = nn.Parameter(
+                torch.full((self.base_action_dim,), -1.0, dtype=torch.float32), requires_grad=True)
+            self.sigma_arm = nn.Parameter(
+                torch.full((self.arm_action_dim,), -1.0, dtype=torch.float32), requires_grad=True)
+        else:
+            # Legacy single output
+            self.mu = torch.nn.Linear(out_size, actions_num)
+            self.sigma = nn.Parameter(
+                torch.zeros(actions_num, requires_grad=True, dtype=torch.float32), requires_grad=True)
+            nn.init.constant_(self.sigma, -1.0)
+            torch.nn.init.orthogonal_(self.mu.weight, gain=0.01)
+        
+        # Value network
         if self.separate_value_mlp:
             self.value_mlp = MLP(units=self.units, input_size=mlp_input_size)
         self.value = torch.nn.Linear(out_size, 1)
-        self.mu = torch.nn.Linear(out_size, actions_num)
-        # [Fix 2025-12-20] Initialize log_std to -1.0 (exp(-1) ≈ 0.37) for more focused exploration
-        # Previous value 0 (exp(0) = 1.0) led to extremely high entropy (~20) at training start
-        # Lower initial std helps policy learn faster by reducing action randomness
-        self.sigma = nn.Parameter(
-            torch.zeros(actions_num, requires_grad=True, dtype=torch.float32), requires_grad=True)
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d) or isinstance(m, nn.Conv1d):
@@ -148,13 +190,7 @@ class ActorCritic(nn.Module):
             if isinstance(m, nn.Linear):
                 if getattr(m, 'bias', None) is not None:
                     torch.nn.init.zeros_(m.bias)
-        # [Fix 2025-12-20] Lower initial log_std from 0 to -1.0 for less random initial policy
-        # This reduces initial entropy from ~20 to ~8, allowing more directed exploration
-        nn.init.constant_(self.sigma, -1.0)
 
-        # policy output layer with scale 0.01
-        # value output layer with scale 1
-        torch.nn.init.orthogonal_(self.mu.weight, gain=0.01)
         torch.nn.init.orthogonal_(self.value.weight, gain=1.0)
     
     def get_initial_hidden(self, batch_size, device):
@@ -186,10 +222,41 @@ class ActorCritic(nn.Module):
         actor_path: Path to save actor model parameters.
         """
         torch.save(self.actor_mlp.state_dict(), actor_mlp_path)
-        torch.save(self.mu.state_dict(), actor_head_path)
-        # Also save CNN?
-        # torch.save(self.cnn.state_dict(), cnn_path)
+        if self.use_separate_heads:
+            # Save both heads
+            torch.save({
+                'base_head': self.base_head.state_dict(),
+                'arm_head': self.arm_head.state_dict(),
+            }, actor_head_path)
+        else:
+            torch.save(self.mu.state_dict(), actor_head_path)
 
+    def load_actor(self, actor_mlp_path, actor_head_path, map_location=None):
+        """
+        Load actor model parameters from files.
+
+        Args:
+            actor_mlp_path: Path to load actor MLP parameters from.
+            actor_head_path: Path to load actor head parameters from.
+            map_location: Optional device mapping for torch.load.
+        """
+        # Load shared MLP parameters
+        mlp_state = torch.load(actor_mlp_path, map_location=map_location)
+        self.actor_mlp.load_state_dict(mlp_state)
+
+        # Load head parameters according to configuration
+        head_state = torch.load(actor_head_path, map_location=map_location)
+        if self.use_separate_heads:
+            # Expected format: {'base_head': ..., 'arm_head': ...}
+            if isinstance(head_state, dict) and 'base_head' in head_state and 'arm_head' in head_state:
+                self.base_head.load_state_dict(head_state['base_head'])
+                self.arm_head.load_state_dict(head_state['arm_head'])
+            else:
+                # Backward-compatible fallback: treat as a single head for base_head
+                self.base_head.load_state_dict(head_state)
+        else:
+            # Single-head configuration
+            self.mu.load_state_dict(head_state)
     @torch.no_grad()
     def act(self, obs_dict, hidden_state=None):
         """
@@ -307,7 +374,18 @@ class ActorCritic(nn.Module):
                 x = gru_out.squeeze(1)
 
         x_actor = self.actor_mlp(x)
-        mu = self.mu(x_actor)
+        
+        # [NEW 2025-01-04] Separate heads for base and arm
+        if self.use_separate_heads:
+            mu_base = self.base_head(x_actor)
+            mu_arm = self.arm_head(x_actor)
+            # Concatenate: [base (2D), arm (6D)]
+            mu = torch.cat([mu_base, mu_arm], dim=-1)
+            # Combine sigmas
+            sigma = torch.cat([self.sigma_base, self.sigma_arm], dim=0)
+        else:
+            mu = self.mu(x_actor)
+            sigma = self.sigma
         
         if self.separate_value_mlp:
             x_value = self.value_mlp(x)
@@ -316,7 +394,6 @@ class ActorCritic(nn.Module):
             
         value = self.value(x_value)
 
-        sigma = self.sigma
         # Normalize to (-1,1)
         mu = torch.tanh(mu)
         

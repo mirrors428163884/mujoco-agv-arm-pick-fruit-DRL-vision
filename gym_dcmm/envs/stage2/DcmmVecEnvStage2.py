@@ -464,6 +464,9 @@ class DcmmVecEnvStage2(gym.Env):
         self.stable_touch_timer = 0.0
         self.reward_stability = 0
         self.grasping_distance_violations = 0  # [New 2025-12-09] Reset violation counter
+        
+        # [NEW 2025-01-04] Reset progress tracking for new episode
+        self.reward_manager.reset_progress_tracking()
 
         self.info = {
             "ee_distance": np.linalg.norm(self.Dcmm.data.body("link6").xpos -

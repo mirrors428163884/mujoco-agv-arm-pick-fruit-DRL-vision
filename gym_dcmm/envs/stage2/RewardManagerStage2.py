@@ -1,8 +1,17 @@
 """
-Reward Manager Stage 2 - Fixed & Improved Version
-Fixed by Gemini:
-1. Added missing perturbation methods and logging interface.
-2. Corrected observation indices for hand joints and touch sensors.
+Reward Manager Stage 2 - Refactored Version (2025-01-04)
+
+Major improvements based on issue requirements:
+1. Progress-based distance rewards (replace milestones)
+2. Improved grasp quality: multi-finger balanced contact, force range rewards
+3. Slip penalty based on relative velocity
+4. Impact penalty for high-speed contacts  
+5. Larger success/failure reward gap (+100/-50)
+6. Perturbation curriculum learning
+
+Key Design Principles:
+- Agent must learn "multi-finger stable grasp + low impact + perturbation resistance"
+- NOT "hit once / clamp once" to farm points
 """
 
 import numpy as np
@@ -24,6 +33,16 @@ class RewardManagerStage2:
 
         # [NEW] Grasp holding timer for progressive reward
         self.grasp_start_time = None
+        
+        # [NEW 2025-01-04] Progress tracking
+        self.prev_ee_distance = None
+        
+        # [NEW 2025-01-04] First contact tracking for impact penalty
+        self.first_contact_occurred = False
+        
+        # [NEW 2025-01-04] Recent success rate tracking for perturbation curriculum
+        self.success_history = []
+        self.max_history_length = 100
 
     # ========================================
     # [RESTORED] Missing Helper Methods
@@ -235,32 +254,35 @@ class RewardManagerStage2:
             return reach_reward
 
     # ========================================
-    # [IMPROVED] Main Reward Function
+    # [REFACTORED 2025-01-04] Main Reward Function
     # ========================================
 
     def compute_reward(self, obs, info, ctrl):
         """
-        Improved Stage 2 reward with:
-        - Finger synergy
-        - Progressive grasp holding
-        - Curriculum perturbation
-        - Fixed regularization (no base)
-        - Grasp intent guidance
+        Refactored Stage 2 reward based on issue requirements:
+        
+        1. Progress-based distance rewards (replace milestones)
+        2. Improved grasp quality: multi-finger balanced, force range
+        3. Slip penalty for unstable grasp
+        4. Impact penalty for high-speed contacts
+        5. Larger success/failure gap (+100/-50)
+        6. Perturbation curriculum learning
         """
         ee_dist = info["ee_distance"]
+        touch_sensors = obs['touch']
+        total_contact_force = np.sum(touch_sensors)
 
-        # 1. EE Reaching (unchanged)
-        reward_reaching = 2.0 * np.exp(-2.0 * ee_dist)
+        # ========================================
+        # 1. PROGRESS-BASED DISTANCE REWARD (replace milestones)
+        # ========================================
+        reward_ee_progress = self._compute_ee_progress_reward(info)
+        
+        # Keep only ONE milestone (d_ee < 0.05) for transition signal
+        reward_milestone = 2.0 if ee_dist < 0.05 else 0.0
 
-        # 2. Distance milestones (unchanged)
-        reward_distance_shaping = 0.0
-        if ee_dist < 0.30:  reward_distance_shaping += 0.5
-        if ee_dist < 0.15: reward_distance_shaping += 1.0
-        if ee_dist < 0.08: reward_distance_shaping += 1.5
-        if ee_dist < 0.05: reward_distance_shaping += 2.0
-        if ee_dist < 0.03: reward_distance_shaping += 2.5  # [NEW] Ultra-close bonus
-
-        # 3. Orientation (simplified, Catching-style)
+        # ========================================
+        # 2. ORIENTATION (only when close, cosine-based)
+        # ========================================
         reward_orientation = 0.0
         if ee_dist < 0.3:
             ee_pos = self.env.Dcmm.data.body("link6").xpos
@@ -270,107 +292,308 @@ class RewardManagerStage2:
             ee_quat = self.env.Dcmm.data.body("link6").xquat
             palm_forward = quat_rotate_vector(ee_quat, np.array([0, 0, -1]))
             alignment = np.dot(palm_forward, ee_to_obj_norm)
-            reward_orientation = max(0, alignment) * 1.0
+            reward_orientation = max(0, alignment) * 0.5
 
-        # 4. [NEW] Grasp intent (early guidance)
-        reward_grasp_intent = self._compute_grasp_intent_reward(obs, info)
+        # ========================================
+        # 3. IMPROVED GRASP QUALITY REWARD
+        # ========================================
+        reward_grasp_quality = self._compute_grasp_quality_reward(touch_sensors)
+        
+        # ========================================
+        # 4. SLIP PENALTY (key for stable grasp)
+        # ========================================
+        reward_slip = self._compute_slip_penalty(touch_sensors)
+        
+        # ========================================
+        # 5. IMPACT PENALTY (prevent high-speed contact)
+        # ========================================
+        reward_impact = self._compute_impact_penalty(touch_sensors)
 
-        # 5. [IMPROVED] Grasp reward with synergy
-        reward_grasp = 0.0
-        total_contact_force = np.sum(obs['touch'])
+        # ========================================
+        # 6. FINGER SYNERGY (balanced multi-finger contact)
+        # ========================================
+        reward_synergy = self._compute_finger_synergy_reward(touch_sensors)
 
-        if total_contact_force > 0.01:
-            fingers_touching = np.count_nonzero(obs['touch'] > 0.05)
-            reward_grasp = 1.0 + 0.5 * fingers_touching
+        # ========================================
+        # 7. PROGRESSIVE GRASP HOLDING
+        # ========================================
+        reward_grasp_hold = self._compute_grasp_hold_reward(touch_sensors)
 
-            # Force range bonus
-            if 0.5 <= total_contact_force <= 3.0:
-                reward_grasp += 2.0
-            elif total_contact_force > 3.0:
-                reward_grasp -= 0.5 * min(total_contact_force - 3.0, 2.0)
-
-        # 6. [NEW] Finger synergy
-        reward_synergy = self._compute_finger_synergy_reward(obs['touch'])
-
-        # 7. [NEW] Progressive grasp holding
-        reward_grasp_hold = self._compute_grasp_hold_reward(obs['touch'])
-
-        # 8. [IMPROVED] Perturbation with curriculum
+        # ========================================
+        # 8. PERTURBATION (with curriculum)
+        # ========================================
         reward_perturbation = self.evaluate_grasp_stability(total_contact_force)
 
-        # 9. Impact penalty (unchanged)
-        reward_impact = 0.0
-        if total_contact_force > 0.01 or self.env.step_touch:
-            ee_vel = np.linalg.norm(self.env.Dcmm.data.body("link6").cvel[3:6])
-            if ee_vel > 0.3:
-                reward_impact = -min(2.0 * (ee_vel - 0.3), 3.0)
-
-        # 10. [FIX] Regularization (no base)
+        # ========================================
+        # 9. REGULARIZATION PENALTIES
+        # ========================================
         reward_regularization = self._compute_regularization_penalty(ctrl)
+        reward_action_rate = self._compute_action_rate_penalty(ctrl)
 
-        # 11. Collision (unchanged)
+        # ========================================
+        # 10. COLLISION PENALTIES
+        # ========================================
         reward_collision = 0.0
         if self.env.terminated and not info.get('is_success', False):
-            reward_collision = -2.0
+            reward_collision = DcmmCfg.reward_weights.get("r_stage2_collision", -50.0)
 
-        # 12. Plant collision (unchanged)
         reward_plant_collision = 0.0
         if self.env.contacts['plant_contacts'].size != 0:
             reward_plant_collision += self.env.current_w_stem
         if self.env.contacts['leaf_contacts'].size != 0:
             reward_plant_collision += -0.05
 
-        # 13. Action rate (unchanged)
-        current_action_vec = np.concatenate([ctrl['arm'], ctrl['hand']])  # [FIX] No base
-        if self.prev_action_reward is None:
-            self.prev_action_reward = np.zeros_like(current_action_vec)
-        action_diff = current_action_vec - self.prev_action_reward
-        reward_action_rate = -np.linalg.norm(action_diff) * 0.02
-        self.prev_action_reward = current_action_vec.copy()
-
-        # 14. Success reward (reduced, now compensated by progressive rewards)
+        # ========================================
+        # 11. SUCCESS/FAILURE REWARDS (large gap)
+        # ========================================
         reward_success = 0.0
+        reward_failure = 0.0
         if info.get('is_success', False):
-            reward_success = 15.0  # Reduced from 20 (progressive rewards compensate)
+            reward_success = DcmmCfg.reward_weights.get("r_stage2_success", 100.0)
+        elif self.env.terminated:
+            reward_failure = DcmmCfg.reward_weights.get("r_stage2_failure", -50.0)
 
-        # Total reward
+        # ========================================
+        # 12. ALIVE PENALTY (prevent stalling)
+        # ========================================
+        reward_alive = DcmmCfg.reward_weights.get("r_stage2_alive", -0.01)
+
+        # ========================================
+        # TOTAL REWARD
+        # ========================================
         total = (
-                reward_reaching + reward_distance_shaping + reward_orientation +
-                reward_grasp_intent + reward_grasp + reward_synergy +
-                reward_grasp_hold + reward_perturbation + reward_impact +
-                reward_regularization + reward_collision + reward_plant_collision +
-                reward_action_rate + reward_success
+            # Progress
+            reward_ee_progress + reward_milestone +
+            # Conditional
+            reward_orientation +
+            # Grasp quality
+            reward_grasp_quality + reward_synergy + reward_grasp_hold +
+            # Penalties
+            reward_slip + reward_impact + reward_regularization + reward_action_rate +
+            reward_collision + reward_plant_collision + reward_alive +
+            # Perturbation
+            reward_perturbation +
+            # Terminal
+            reward_success + reward_failure
         )
 
-        # Logging (update stats)
+        # ========================================
+        # LOGGING
+        # ========================================
         if not hasattr(self, 'reward_stats'):
             self._init_reward_stats()
-        self.reward_stats['reaching_sum'] += reward_reaching
-        self.reward_stats['grasp_sum'] += reward_grasp
-        self.reward_stats['synergy_sum'] += reward_synergy  # [NEW]
-        self.reward_stats['grasp_hold_sum'] += reward_grasp_hold  # [NEW]
+        self.reward_stats['ee_progress_sum'] += reward_ee_progress
+        self.reward_stats['grasp_quality_sum'] += reward_grasp_quality
+        self.reward_stats['synergy_sum'] += reward_synergy
+        self.reward_stats['grasp_hold_sum'] += reward_grasp_hold
+        self.reward_stats['slip_sum'] += reward_slip
+        self.reward_stats['impact_sum'] += reward_impact
         self.reward_stats['perturbation_sum'] += reward_perturbation
         self.reward_stats['collision_sum'] += reward_collision
         self.reward_stats['success_sum'] += reward_success
         self.reward_stats['count'] += 1
 
         if self.env.print_reward:
-            print(f"reward_reaching: {reward_reaching:.3f}")
-            print(f"reward_grasp: {reward_grasp:.3f}")
-            print(f"reward_synergy: {reward_synergy:.3f}")  # [NEW]
-            print(f"reward_grasp_hold: {reward_grasp_hold:.3f}")  # [NEW]
-            print(f"reward_perturbation: {reward_perturbation:.3f}")
-            print(f"total:  {total:.3f}\n")
+            print(f"[Stage2] ee_prog={reward_ee_progress:.3f}, grasp={reward_grasp_quality:.3f}, "
+                  f"synergy={reward_synergy:.3f}, slip={reward_slip:.3f}, impact={reward_impact:.3f}, "
+                  f"perturb={reward_perturbation:.3f}, success={reward_success:.3f}, total={total:.3f}")
 
         return total
+
+    # ========================================
+    # NEW Reward Components (2025-01-04)
+    # ========================================
+    
+    def _compute_ee_progress_reward(self, info):
+        """
+        Progress-based EE distance reward.
+        
+        Formula: r_ee = k * (d_ee_prev - d_ee_curr), clipped to [-0.2, 0.2]
+        
+        Where:
+        - d_ee_prev: EE-to-target distance at previous timestep
+        - d_ee_curr: EE-to-target distance at current timestep
+        - Positive reward when getting closer (d_ee_prev > d_ee_curr)
+        """
+        current_dist = info["ee_distance"]
+        
+        if self.prev_ee_distance is None:
+            self.prev_ee_distance = current_dist
+            return 0.0
+        
+        progress = self.prev_ee_distance - current_dist
+        k = DcmmCfg.reward_weights.get("r_stage2_ee_progress", 3.0)
+        reward = np.clip(k * progress, -0.2, 0.2)
+        
+        self.prev_ee_distance = current_dist
+        return reward
+    
+    def _compute_grasp_quality_reward(self, touch_sensors):
+        """
+        Improved grasp quality reward:
+        1. Multi-finger contact count reward
+        2. Force in optimal range [f_low, f_high] reward
+        3. Force balance (penalize variance) reward
+        
+        Args:
+            touch_sensors: Array of 4 touch values [thumb, index, middle, ring]
+        """
+        # Force thresholds (in Newtons).
+        # Try to adapt thresholds to the simulated touch sensor configuration
+        # if the environment exposes a maximum touch force; otherwise, fall back
+        # to conservative defaults suitable for relatively sensitive sensors.
+        sensor_force_max = getattr(self.env, "touch_sensor_force_max_n", None)
+        if isinstance(sensor_force_max, (int, float)) and sensor_force_max > 0:
+            # Thresholds expressed as fractions of sensor max force.
+            f_min = 0.02 * sensor_force_max   # Minimum effective contact (~2% of max)
+            f_low = 0.05 * sensor_force_max   # Lower bound of optimal range (~5% of max)
+            f_high = 0.5 * sensor_force_max   # Upper bound of optimal range (~50% of max)
+        else:
+            # Fallback defaults; tune as needed to match actual sensor scaling.
+            f_min = 0.02    # Minimum force for "effective contact" (N)
+            f_low = 0.05    # Lower bound of optimal range (N)
+            f_high = 1.0    # Upper bound of optimal range (N)
+        f_mid = (f_low + f_high) / 2
+        f_band = (f_high - f_low) / 2
+        
+        n_finger = len(touch_sensors)
+        
+        # Count effective contacts
+        active_mask = touch_sensors > f_min
+        n_contact = np.sum(active_mask)
+        
+        # Grasp count weight (used for both single- and multi-finger cases)
+        k_cnt = DcmmCfg.reward_weights.get("r_grasp_count", 1.5)
+        
+        # Provide a small positive reward for establishing initial single-finger contact,
+        # while keeping zero reward when there is no contact at all.
+        if n_contact < 2:
+            if n_contact == 1:
+                # Shaping reward for single-finger contact progress toward a full grasp
+                return 0.3 * k_cnt / n_finger
+            return 0.0
+        
+        # 1. Multi-finger count reward: k_cnt * (n_contact / n_finger)
+        r_cnt = k_cnt * (n_contact / n_finger)
+        
+        # 2. Force range reward: encourage forces in [f_low, f_high]
+        k_f = DcmmCfg.reward_weights.get("r_grasp_force_range", 1.0)
+        force_scores = []
+        for f in touch_sensors:
+            if f > f_min:
+                # Score is 1.0 when f = f_mid, decays as f moves away
+                score = max(0, 1 - abs(f - f_mid) / f_band)
+                force_scores.append(score)
+        r_force = k_f * np.mean(force_scores) if force_scores else 0.0
+        
+        # 3. Force balance reward: penalize variance
+        k_b = DcmmCfg.reward_weights.get("r_grasp_balance", 0.5)
+        active_forces = touch_sensors[active_mask]
+        if len(active_forces) >= 2:
+            variance = np.var(active_forces)
+            r_bal = -k_b * variance
+        else:
+            r_bal = 0.0
+        
+        return r_cnt + r_force + r_bal
+    
+    def _compute_slip_penalty(self, touch_sensors=None):
+        """
+        Slip penalty: penalize relative velocity between object and hand.
+        r_slip = -k_s * |v_rel|
+        
+        This is critical for learning stable grasp instead of "bump and done".
+        
+        Args:
+            touch_sensors: Optional touch sensor readings to verify contact
+        """
+        k_s = DcmmCfg.reward_weights.get("r_slip_penalty", 1.0)
+        
+        # Check for meaningful contact using force threshold
+        min_contact_force = 0.02  # Minimum force for meaningful contact
+        has_contact = False
+        
+        if touch_sensors is not None:
+            total_force = np.sum(touch_sensors)
+            has_contact = total_force > min_contact_force
+        elif hasattr(self.env, 'step_touch'):
+            has_contact = self.env.step_touch
+        
+        # Only apply penalty if there's meaningful contact
+        if not has_contact:
+            return 0.0
+        
+        # Get object velocity
+        obj_vel = self.env.Dcmm.data.body(self.env.object_name).cvel[3:6]
+        
+        # Get EE velocity
+        ee_vel = self.env.Dcmm.data.body("link6").cvel[3:6]
+        
+        # Relative velocity
+        v_rel = np.linalg.norm(obj_vel - ee_vel)
+        
+        return -k_s * v_rel
+    
+    def _compute_impact_penalty(self, touch_sensors):
+        """
+        Impact penalty: penalize high-speed first contact.
+        - If first contact with |v_ee| > v_thr, give large penalty
+        - Also continuous penalty proportional to speed
+        """
+        total_force = np.sum(touch_sensors)
+        
+        # Check if this is first contact
+        if total_force > 0.01 and not self.first_contact_occurred:
+            self.first_contact_occurred = True
+            
+            # Check EE velocity at first contact
+            ee_vel = np.linalg.norm(self.env.Dcmm.data.body("link6").cvel[3:6])
+            v_thr = DcmmCfg.reward_weights.get("r_impact_vel_threshold", 0.3)
+            
+            if ee_vel > v_thr:
+                # Large one-time penalty for high-speed first contact
+                penalty = DcmmCfg.reward_weights.get("r_impact_first_contact", -5.0)
+                return penalty
+        
+        # Continuous penalty for high-speed contact
+        if total_force > 0.01 or (hasattr(self.env, 'step_touch') and self.env.step_touch):
+            ee_vel = np.linalg.norm(self.env.Dcmm.data.body("link6").cvel[3:6])
+            if ee_vel > 0.3:
+                k_impact = DcmmCfg.reward_weights.get("r_impact_continuous", 2.0)
+                return -min(k_impact * (ee_vel - 0.3), 3.0)
+        
+        return 0.0
+    
+    def _compute_action_rate_penalty(self, ctrl):
+        """Action rate penalty (arm + hand, no base)."""
+        current_action = np.concatenate([ctrl['arm'], ctrl['hand']])
+        
+        if self.prev_action_reward is None:
+            self.prev_action_reward = np.zeros_like(current_action)
+        
+        action_diff = current_action - self.prev_action_reward
+        penalty = -np.linalg.norm(action_diff) * 0.02
+        
+        self.prev_action_reward = current_action.copy()
+        return penalty
+    
+    def reset_progress_tracking(self):
+        """Reset progress tracking for new episode."""
+        self.prev_ee_distance = None
+        self.first_contact_occurred = False
+        self.grasp_start_time = None
+        self.perturbation_active = False
+        self.initial_grasp_pos = None
 
     # [UPDATE] Stats tracking
     def _init_reward_stats(self):
         self.reward_stats = {
-            'reaching_sum': 0.0,
-            'grasp_sum': 0.0,
-            'synergy_sum': 0.0,  # [NEW]
-            'grasp_hold_sum': 0.0,  # [NEW]
+            'ee_progress_sum': 0.0,
+            'grasp_quality_sum': 0.0,
+            'synergy_sum': 0.0,
+            'grasp_hold_sum': 0.0,
+            'slip_sum': 0.0,
+            'impact_sum': 0.0,
             'perturbation_sum': 0.0,
             'collision_sum': 0.0,
             'success_sum': 0.0,
@@ -390,10 +613,12 @@ class RewardManagerStage2:
 
         count = self.reward_stats['count']
         stats = {
-            'rewards/reaching_mean': self.reward_stats['reaching_sum'] / count,
-            'rewards/grasp_mean': self.reward_stats['grasp_sum'] / count,
+            'rewards/ee_progress_mean': self.reward_stats['ee_progress_sum'] / count,
+            'rewards/grasp_quality_mean': self.reward_stats['grasp_quality_sum'] / count,
             'rewards/synergy_mean': self.reward_stats['synergy_sum'] / count,
             'rewards/grasp_hold_mean': self.reward_stats['grasp_hold_sum'] / count,
+            'rewards/slip_mean': self.reward_stats['slip_sum'] / count,
+            'rewards/impact_mean': self.reward_stats['impact_sum'] / count,
             'rewards/perturbation_mean': self.reward_stats['perturbation_sum'] / count,
             'rewards/collision_mean': self.reward_stats['collision_sum'] / count,
             'rewards/success_mean': self.reward_stats['success_sum'] / count,
