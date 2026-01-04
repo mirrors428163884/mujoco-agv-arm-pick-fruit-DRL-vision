@@ -2,13 +2,13 @@
 import gymnasium as gym
 import numpy as np
 import cv2 as cv
-from gym_dcmm.envs.DcmmVecEnv import DcmmVecEnv
+from gym_dcmm.envs.stage1.DcmmVecEnvStage1 import DcmmVecEnvStage1
 import configs.env.DcmmCfg as DcmmCfg
 
 def test_env():
-    print("Initializing DcmmVecEnv...")
+    print("Initializing DcmmVecEnvStage1...")
     try:
-        env = DcmmVecEnv(
+        env = DcmmVecEnvStage1(
             task='Tracking', 
             object_name='object', 
             render_per_step=False, 
@@ -47,7 +47,7 @@ def test_env():
         # Create dummy action
         action = {
             'base': np.zeros(2),
-            'arm': np.zeros(4),
+            'arm': np.zeros(6),  # 6 DOF arm, not 4
             'hand': np.zeros(12)
         }
         
