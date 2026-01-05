@@ -68,7 +68,7 @@ class DcmmVecEnvStage1(gym.Env):
         camera_name=["wrist"],
         object_name="object",
         env_time=2.5,
-        steps_per_policy=20,
+        steps_per_policy=None,  # [UPDATED 2025-01-04] Default from config
         img_size=(480, 640),
         device='cuda:0',
         print_obs=False,
@@ -89,7 +89,8 @@ class DcmmVecEnvStage1(gym.Env):
         self.task = task
         self.img_size = img_size
         self.device = device
-        self.steps_per_policy = steps_per_policy
+        # [UPDATED 2025-01-04] Use config default if not specified (10 instead of 20)
+        self.steps_per_policy = steps_per_policy if steps_per_policy is not None else DcmmCfg.default_steps_per_policy
         self.render_per_step = render_per_step
 
         # Print Settings
@@ -163,6 +164,9 @@ class DcmmVecEnvStage1(gym.Env):
             {
                 "base": spaces.Dict({
                     "v_lin_2d": spaces.Box(-4, 4, shape=(2,), dtype=np.float32),
+                    # [NEW 2025-01-04] Base heading observation for explicit chassis orientation
+                    # [sin(heading), cos(heading), sin(angle_err), cos(angle_err)]
+                    "heading": spaces.Box(-1, 1, shape=(4,), dtype=np.float32),
                 }),
                 "arm": spaces.Dict({
                     "ee_pos3d": spaces.Box(-10, 10, shape=(3,), dtype=np.float32),
@@ -224,9 +228,12 @@ class DcmmVecEnvStage1(gym.Env):
         self.obs_dim = get_total_dimension(self.observation_space)
         self.act_dim = get_total_dimension(self.action_space)
         # Dimension for training
-        # Base: 2 (v_lin_2d), Arm: 3+4+3=10 (ee_pos, ee_quat, ee_vel), Object: 3 (pos3d) + 1 (is_valid, optional) = 4
-        # Total: 2 + 10 + 4 = 16 (with validity flag) or 15 (without)
-        self.obs_t_dim = 2 + 3 + 4 + 3 + 3 + (
+        # [UPDATED 2025-01-04] Added base heading observation (+4)
+        # Base: 2 (v_lin_2d) + 4 (heading) = 6
+        # Arm: 3+4+3=10 (ee_pos, ee_quat, ee_vel)
+        # Object: 3 (pos3d) + 1 (is_valid, optional) = 3 or 4
+        # Total: 6 + 10 + 3 = 19 (without validity flag) or 20 (with)
+        self.obs_t_dim = 2 + 4 + 3 + 4 + 3 + 3 + (
             1 if DcmmCfg.obj_pos_noise.enabled and DcmmCfg.obj_pos_noise.add_validity_flag else 0
         )
         self.act_t_dim = 8 # 2 base + 6 arm
@@ -427,7 +434,7 @@ class DcmmVecEnvStage1(gym.Env):
                                        self.Dcmm.data.body(self.Dcmm.object_name).xpos[0:3]),
             "base_distance": np.linalg.norm(self.Dcmm.data.body("arm_base").xpos[0:2] -
                                              self.Dcmm.data.body(self.Dcmm.object_name).xpos[0:2]),
-            "evn_time": self.Dcmm.data.time - self.start_time,
+            "env_time": self.Dcmm.data.time - self.start_time,  # [FIX] Corrected typo: evn_time -> env_time
         }
 
         # Get the observation and info

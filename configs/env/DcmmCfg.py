@@ -19,6 +19,11 @@ WEIGHT_PATH = os.path.join(ASSET_PATH, "weights")
 ## 0.25m was too early, causing Stage2 to learn both approach + grasp simultaneously
 distance_thresh = 0.10
 
+## [NEW 2025-01-04] Default control frequency setting
+## Reduced from 20 to 10 for higher control frequency and lower latency
+## This improves responsiveness of the base controller
+default_steps_per_policy = 10
+
 ## Define the initial joint positions of the arm and the hand
 # Pre-grasp pose for maximum flexibility (Stage 2 optimized)
 # [Fix 2025-12-09] Updated to be within joint limits:
@@ -55,6 +60,15 @@ reward_weights = {
     # ========================================
     "r_orientation_gate": 0.30,     # Only apply orientation reward when d_ee < this (meters)
     "r_orientation_v2": 0.4,        # Cosine-based orientation reward (recommended: 0.2-0.6)
+    
+    # ========================================
+    # Stage 1: Milestone Rewards (NEW 2025-01-04)
+    # One-time bonuses for reaching distance thresholds, fills gap between
+    # dense progress rewards and sparse success bonus
+    # ========================================
+    "r_milestone_1m": 5.0,          # Bonus for entering < 1.0m range
+    "r_milestone_05m": 10.0,        # Bonus for entering < 0.5m range
+    "r_milestone_02m": 15.0,        # Bonus for entering < 0.2m range
     
     # ========================================
     # Stage 1: Terminal Rewards (UPDATED)
@@ -125,6 +139,9 @@ reward_weights = {
     # Joint and heading rewards
     "r_joint_limit": -2.0,
     "r_base_heading": 0.5,
+    # [NEW 2025-01-04] Distance gate for base heading reward (prevent "站桩刷分")
+    # Only reward orientation when base is closer than this distance
+    "r_base_heading_gate": 1.5,
     "r_contact_persistence": 2.0,
 }
 
@@ -202,9 +219,12 @@ Kd_drive = 1e-1
 llim_drive = -200
 ulim_drive = 200
 # steering
-Kp_steer = 50.0
+# [UPDATED 2025-01-04] Reduced Kp_steer from 50.0 to 35.0 to prevent oscillation
+# when using higher control frequency (steps_per_policy=10 instead of 20)
+# Increased Kd_steer from 7.5 to 10.0 for better damping
+Kp_steer = 35.0
 Ki_steer = 2.5
-Kd_steer = 7.5
+Kd_steer = 10.0
 llim_steer = -50
 ulim_steer = 50
 
@@ -234,8 +254,11 @@ hand_mask = np.array([1, 0, 1, 1,
 class curriculum:
     # ========================================
     # Stage 1 Curriculum (Tracking/Approach)
+    # [FIX 2025-01-04] Aligned stage1_steps with curriculum expansion schedule
+    # Previously: stage1_steps=2M but dist_expand_step2=3M caused curriculum to
+    # never reach full difficulty. Now both are aligned at 3M.
     # ========================================
-    stage1_steps = 2e6  # First 2M steps
+    stage1_steps = 3e6  # Curriculum runs for 3M steps to reach full difficulty
     
     # [NEW 2025-01-04] Stage 1 distance-based initialization curriculum
     # Start with closer targets, gradually increase range
@@ -303,22 +326,31 @@ class avp:
 
     # ========================================
     # Lambda Scheduling (Curriculum-Based)
+    # [UPDATED 2025-01-04] Changed to smooth cosine scheduling
     # ========================================
     # Legacy weights (now used as fallback bounds)
     lambda_weight_start = 0.8   # Not used directly anymore
     lambda_weight_end = 0.2     # Not used directly anymore
     
-    # [NEW 2025-01-04] Adaptive lambda scheduling
+    # [NEW 2025-01-04] Adaptive lambda scheduling with cosine transition
     # Note: Uses curriculum difficulty (step-based) as proxy for progress
     warmup_steps = 500000       # 0.5M steps: λ=0 (let progress reward dominate first)
     lambda_max = 0.4            # Max λ during mid-training phase
     lambda_min = 0.1            # Min λ during late-training decay phase
     
+    # [NEW 2025-01-04] Smooth cosine scheduling parameters
+    # If True, uses cosine instead of piecewise linear for smoother transitions
+    use_cosine_schedule = True
+    cosine_rampup_end = 0.3     # difficulty threshold for ramp-up completion
+    cosine_decay_start = 0.7    # difficulty threshold for decay start
+    
     # ========================================
     # Distance Gate
+    # [UPDATED 2025-01-04] Relaxed from 1.5m to 2.0m based on issue feedback
+    # If avp/distance_gate_ratio > 95%, the gate is too strict
     # ========================================
     # Only compute AVP when EE is closer than this (meters)
-    gate_distance = 1.5
+    gate_distance = 2.0  # Relaxed from 1.5m to 2.0m
     
     # ========================================
     # OOD/Confidence Gating
@@ -398,29 +430,45 @@ class ground_dr:
 
 ## Object Position Noise Configuration (Domain Randomization for obj_pos)
 ## Simulates YOLO detection noise and frame drops
+## [UPDATED 2025-01-04] Added curriculum-based progressive randomization
 class obj_pos_noise:
     # Master switch
     enabled = True
     
+    # [NEW 2025-01-04] Curriculum-based progressive randomization
+    # Phase 0 (0-1M steps): Disabled or very low probability
+    # Phase 1 (1M-2M steps): Gradually increase to full strength
+    # Phase 2 (2M+ steps): Full randomization
+    curriculum_enabled = True
+    curriculum_phase0_steps = 1e6   # 1M steps with minimal noise
+    curriculum_phase1_steps = 2e6   # 2M steps to full strength
+    
     # Gaussian noise (simulates sensor random measurement errors)
     gaussian_enabled = True
     gaussian_std = 0.02  # Standard deviation in meters (2cm noise)
+    # Curriculum: std scales from 0.005 (phase 0) to full std (phase 2)
+    gaussian_std_start = 0.005
     
     # Frame drop simulation (simulates YOLO detection failures)
     frame_drop_enabled = True
     drop_probability = 0.1  # 10% chance of frame drop per step
     drop_use_zero = False   # If True, set to 0; if False, use previous frame value
+    # Curriculum: probability scales from 0.02 (phase 0) to full probability (phase 2)
+    drop_probability_start = 0.02
     
     # Consecutive frame drop simulation (simulates prolonged detection loss)
     consecutive_drop_enabled = True
     consecutive_drop_prob = 0.05  # 5% chance to start consecutive drop sequence
     consecutive_drop_length = (2, 5)  # Range of consecutive frames to drop
+    # Curriculum: disabled in phase 0, gradually enabled in phase 1
+    consecutive_drop_prob_start = 0.0
     
     # Observation validity flag (helps network distinguish dropped vs valid observations)
     add_validity_flag = True  # If True, adds 1-bit is_valid flag to observation
 
 
 ## GRU (Recurrent Neural Network) Configuration for memory
+## [UPDATED 2025-01-04] Added stage-specific controls and conditional disabling
 class gru_config:
     # Master switch for RNN
     enabled = True
@@ -430,3 +478,30 @@ class gru_config:
     
     # Number of GRU layers
     num_layers = 1
+    
+    # [NEW 2025-01-04] Stage-specific GRU control
+    # GRU adds training instability when frame drop rate is low
+    # Consider disabling for Stage 1 if YOLO drop simulation is minimal
+    stage1_enabled = True     # Set to False to disable GRU in Stage 1
+    stage2_enabled = True     # Stage 2 usually benefits from GRU
+    
+    # [NEW 2025-01-04] Conditional disabling based on frame drop rate
+    # If frame drop probability < threshold, automatically disable GRU
+    auto_disable_threshold = 0.05  # Disable GRU if drop_probability < 5%
+
+
+## Network Architecture Configuration
+## [NEW 2025-01-04] Configurable network capacity
+class network_config:
+    # Actor/Critic MLP hidden layer sizes
+    # Default: [256, 128] - original configuration
+    # Larger: [512, 256] - increased capacity for complex tasks
+    mlp_units = [256, 128]
+    
+    # [NEW 2025-01-04] Option for increased capacity
+    # Set to True to use [512, 256] for both Actor and Critic
+    use_large_network = False
+    large_mlp_units = [512, 256]
+    
+    # Separate value MLP (Critic uses separate network from Actor)
+    separate_value_mlp = True
