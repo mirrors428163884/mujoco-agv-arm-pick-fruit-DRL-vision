@@ -520,9 +520,19 @@ class PPO_Stage1(object):
             # Build list of observation components
             obs_components = [
                 obs["base"]["v_lin_2d"], 
+            ]
+            # [FIX 2025-01-04] Include base heading observation if present
+            # This provides explicit chassis orientation info to the network
+            if "heading" in obs["base"]:
+                heading = obs["base"]["heading"]
+                if heading.ndim == 1:
+                    # Single env case: (4,) -> (1, 4)
+                    heading = heading[np.newaxis, :]
+                obs_components.append(heading)
+            obs_components.extend([
                 obs["arm"]["ee_pos3d"], obs["arm"]["ee_quat"], obs["arm"]["ee_v_lin_3d"],
                 obs["object"]["pos3d"],
-            ]
+            ])
             # Add validity flag if present (helps network distinguish dropped vs valid observations)
             if "is_valid" in obs["object"]:
                 # is_valid is now (N, 1) from vec env stacking or (1,) for single env

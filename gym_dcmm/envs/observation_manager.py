@@ -49,7 +49,7 @@ class ObservationManager:
         to target (angle difference).
         
         Returns:
-            np.ndarray: [sin(heading), cos(heading), sin(angle_to_target), cos(angle_to_target)]
+            np.ndarray: [sin(base_heading), cos(base_heading), sin(heading_error), cos(heading_error)]
                         Shape: (4,), dtype: np.float32
         """
         # Get base position and orientation

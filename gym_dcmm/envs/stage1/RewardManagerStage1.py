@@ -910,7 +910,9 @@ class RewardManagerStage1:
         base_quat = self.env.Dcmm.data.body("arm_base").xquat
         base_heading = quat_to_euler(base_quat)[2]  # yaw
         
-        heading_error = np.abs(angle_diff(base_heading, target_heading))
+        # [FIX 2025-01-04] Use consistent argument order: angle_diff(target, base)
+        # This matches observation_manager.py for consistency
+        heading_error = np.abs(angle_diff(target_heading, base_heading))
         
         weight = DcmmCfg.reward_weights.get('r_base_heading', 0.5)
         return weight * np.exp(-2.0 * heading_error)
