@@ -239,7 +239,7 @@ class PPO_Stage1(object):
         
         # KL divergence analysis
         if latest_kl > 0.02:
-            suggestions.append("⚠️ KL过高(>{:.4f}): 考虑降低学习率或减小e_clip".format(latest_kl))
+            suggestions.append(f"⚠️ KL过高(>{latest_kl:.4f}): 考虑降低学习率或减小e_clip")
         elif latest_kl < 0.001:
             suggestions.append("ℹ️ KL过低(<0.001): 策略更新保守，考虑提高学习率")
         
