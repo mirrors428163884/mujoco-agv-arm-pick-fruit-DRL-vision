@@ -46,14 +46,16 @@ reward_weights = {
     # ========================================
     # Stage 1: Progress-Based Rewards (NEW)
     # ========================================
-    "r_ee_progress": 3.0,           # EE progress toward target (recommended: 2.0-5.0)
-    "r_base_progress": 2.0,         # Base progress toward optimal distance (recommended: 1.0-3.0)
+    # ===== 关键修改4: 增强进度奖励 =====
+    "r_ee_progress": 5.0,           # 从3.0提升到5.0
+    "r_base_progress": 3.0,         # 从2.0提升到3.0
     
     # ========================================
     # Stage 1: Regularization Penalties (NEW)
     # ========================================
-    "r_alive_penalty": -0.01,       # Per-step time penalty (recommended: -0.01 to -0.02)
-    "r_stagnation_penalty": -0.1,   # Penalty when stuck for N steps
+    # ===== 关键修改5: 增强存活惩罚 =====
+    "r_alive_penalty": -0.05,       # 从-0.01提升到-0.05
+    "r_stagnation_penalty": -0.2,   # 从-0.1提升到-0.2
     
     # ========================================
     # Stage 1: Conditional Rewards (NEW)
@@ -66,9 +68,10 @@ reward_weights = {
     # One-time bonuses for reaching distance thresholds, fills gap between
     # dense progress rewards and sparse success bonus
     # ========================================
-    "r_milestone_1m": 5.0,          # Bonus for entering < 1.0m range
-    "r_milestone_05m": 10.0,        # Bonus for entering < 0.5m range
-    "r_milestone_02m": 15.0,        # Bonus for entering < 0.2m range
+    # ===== 关键修改6: 增强里程碑奖励 =====
+    "r_milestone_1m": 10.0,         # 从5.0提升到10.0
+    "r_milestone_05m": 20.0,        # 从10.0提升到20.0
+    "r_milestone_02m": 30.0,        # 从15.0提升到30.0
     
     # ========================================
     # Stage 1: Terminal Rewards (UPDATED)

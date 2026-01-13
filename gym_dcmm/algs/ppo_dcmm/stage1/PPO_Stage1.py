@@ -421,12 +421,26 @@ class PPO_Stage1(object):
                 ee_dist = reward_stats.get('distance/ee_distance_mean', 0)
                 base_dist = reward_stats.get('distance/base_distance_mean', 0)
                 arm_dist = reward_stats.get('distance/arm_reach_distance_mean', 0)
-                print(f"│ {'EE Distance':<15}: {ee_dist:>7.3f}m  │ {'Base Distance':<15}: {base_dist:>7.3f}m  │ {'Arm Reach Dist':<15}: {arm_dist:>7.3f}m  │{'':>35} │")
+                min_ee_dist = reward_stats.get('distance/min_ee_distance_mean', 0)
+                print(f"│ {'EE Distance':<15}: {ee_dist:>7.3f}m  │ {'Base Distance':<15}: {base_dist:>7.3f}m  │ {'Arm Reach Dist':<15}: {arm_dist:>7.3f}m  │ {'Min EE Dist':<15}: {min_ee_dist:>7.3f}m │")
+                # Initial distance stats
+                init_ee_dist = reward_stats.get('distance/initial_ee_distance_mean', 0)
+                init_base_dist = reward_stats.get('distance/initial_base_distance_mean', 0)
+                print(f"│ {'Init EE Dist':<15}: {init_ee_dist:>7.3f}m  │ {'Init Base Dist':<15}: {init_base_dist:>7.3f}m  │{'':>35} │{'':>35} │")
                 # Curriculum info
                 curr_diff = reward_stats.get('curriculum/difficulty', 0)
                 curr_stem = reward_stats.get('curriculum/w_stem', 0)
                 curr_orient = reward_stats.get('curriculum/orient_power', 1.0)
                 print(f"│ {'Curriculum Diff':<15}: {curr_diff:>8.3f} │ {'Stem Weight':<15}: {curr_stem:>8.3f} │ {'Orient Power':<15}: {curr_orient:>8.3f} │{'':>35} │")
+                print(f"├{'─'*108}┤")
+                # [NEW 2025-01-13] 监控数值: Episode终止原因统计
+                print(f"│ {'📊 EPISODE TERMINATION STATS':<106} │")
+                print(f"├{'─'*108}┤")
+                timeout_ratio = reward_stats.get('episode/timeout_ratio', 0)
+                collision_ratio = reward_stats.get('episode/collision_ratio', 0)
+                success_ratio = reward_stats.get('episode/success_ratio', 0)
+                episode_count = reward_stats.get('episode/total_count', 0)
+                print(f"│ {'Timeout':<15}: {timeout_ratio*100:>7.1f}%  │ {'Collision':<15}: {collision_ratio*100:>7.1f}%  │ {'Success':<15}: {success_ratio*100:>7.1f}%  │ {'Total Episodes':<15}: {episode_count:>6d}  │")
                 print(f"└{'─'*108}┘")
             
             # AVP statistics (if available)

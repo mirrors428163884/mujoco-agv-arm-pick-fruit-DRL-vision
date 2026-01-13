@@ -14,17 +14,17 @@ ppo:
   normalize_value: True
   value_bootstrap: True
   num_actors: ${resolve_default:8,${...num_envs}}
-  reward_scale_value: 0.01  #修改了！！！！！！！！！！！！！！！！！！！
+  # ===== 关键修改1: 奖励缩放 =====
+  reward_scale_value: 0.1  # 从0.01改到0.1 ⚠️重要
   clip_value_loss: False
   normalize_advantage: True
   gamma: 0.99
   tau: 0.95
   
-  # [Modified] Lower learning rate for stability
-  lr_schedule: linear  # 改为线性衰减，或者先用 "fixed" (固定)！！！！！！！！！！！！！！
-  learning_rate: 3e-4  # 保持这个初始值！！！！！！！！！！！！！！！！！！
-  #lr_schedule: kl
-  #kl_threshold: 0.016
+  # ===== 关键修改2: 学习率 =====
+  lr_schedule: kl           # 改用KL自适应
+  kl_threshold: 0.008       # 目标KL
+  learning_rate: 3e-4       # 初始学习率
   
   save_best_after: 500
   save_frequency: 2000
@@ -32,8 +32,8 @@ ppo:
   # [Modified] Stricter gradient clipping
   grad_norm: 0.5 
   
-  # [Critical] Enable entropy regularization to prevent early convergence to "playing dead"
-  entropy_coef: 0.01 
+  # ===== 关键修改3: 熵系数 =====
+  entropy_coef: 0.005       # 从0.01降到0.005
   
   freeze_base: False
   freeze_arm: False
