@@ -11,8 +11,8 @@ three-stage reward structure to eliminate reward hacking and "站桩刷分" beha
 
 NEW Reward Structure:
 1. Progress-based Rewards (replace absolute distance rewards):
-   - EE Progress: k_ee * (d_ee_prev - d_ee_curr), clipped to [-0.2, 0.2]
-   - Base Progress: k_base * (d_base_prev - d_base_curr), clipped to [-0.2, 0.2]
+   - EE Progress: k_ee * (d_ee_prev - d_ee_curr), clipped to [-0.5, 0.5]
+   - Base Progress: k_base * (d_base_prev - d_base_curr), clipped to [-0.5, 0.5]
    
 2. Regularization Penalties:
    - Alive Penalty: -0.01 per step to prevent stalling
@@ -37,6 +37,7 @@ Removed/Modified:
 import numpy as np
 import torch
 import os
+from collections import deque
 import configs.env.DcmmCfg as DcmmCfg
 from gym_dcmm.utils.quat_utils import quat_rotate_vector, quat_to_euler, angle_diff
 
@@ -369,9 +370,10 @@ class RewardManagerStage1:
         progress = self.prev_ee_distance - current_dist
         
         # Apply weight and clip
-        k_ee = DcmmCfg.reward_weights.get("r_ee_progress", 3.0)
+        # ===== 关键修改7: 放宽clip范围 =====
+        k_ee = DcmmCfg.reward_weights.get("r_ee_progress", 5.0)
         reward = k_ee * progress
-        reward = np.clip(reward, -0.2, 0.2)
+        reward = np.clip(reward, -0.5, 0.5)  # 从±0.2改到±0.5
         
         # Update previous distance
         self.prev_ee_distance = current_dist
@@ -405,9 +407,10 @@ class RewardManagerStage1:
         progress = prev_error - curr_error  # Positive if error decreased
         
         # Apply weight and clip
-        k_base = DcmmCfg.reward_weights.get("r_base_progress", 2.0)
+        # ===== 关键修改7: 放宽clip范围 =====
+        k_base = DcmmCfg.reward_weights.get("r_base_progress", 3.0)
         reward = k_base * progress
-        reward = np.clip(reward, -0.2, 0.2)
+        reward = np.clip(reward, -0.5, 0.5)  # 从±0.2改到±0.5
         
         # Update previous distance
         self.prev_base_distance = current_dist
@@ -634,6 +637,41 @@ class RewardManagerStage1:
         # [NEW 2025-01-04] Reset AVP potential for new episode
         if self.use_avp:
             self.avp_prev_potential = None
+        
+        # Reset episode minimum EE distance tracking
+        self.current_episode_min_ee_distance = float('inf')
+    
+    def record_episode_end(self, termination_reason, initial_ee_distance=None, initial_base_distance=None):
+        """
+        Record episode termination statistics.
+        
+        监控数值: Episode终止原因统计
+        
+        Args:
+            termination_reason: str - 'timeout', 'collision', or 'success'
+            initial_ee_distance: float - Initial EE-to-target distance at episode start
+            initial_base_distance: float - Initial base-to-target distance at episode start
+        """
+        # 更新Episode终止原因统计
+        self.reward_stats['episode_total_count'] += 1
+        
+        if termination_reason == 'timeout':
+            self.reward_stats['episode_timeout_count'] += 1
+        elif termination_reason == 'collision':
+            self.reward_stats['episode_collision_count'] += 1
+        elif termination_reason == 'success':
+            self.reward_stats['episode_success_count'] += 1
+        
+        # 记录本Episode最小EE距离
+        if self.current_episode_min_ee_distance < float('inf'):
+            self.reward_stats['min_ee_distance_sum'] += self.current_episode_min_ee_distance
+            self.reward_stats['min_ee_distance_deque'].append(self.current_episode_min_ee_distance)
+        
+        # 记录初始距离
+        if initial_ee_distance is not None:
+            self.reward_stats['initial_ee_distance_sum'] += initial_ee_distance
+        if initial_base_distance is not None:
+            self.reward_stats['initial_base_distance_sum'] += initial_base_distance
 
     # ========================================
     # Individual Reward Components
@@ -1357,7 +1395,26 @@ class RewardManagerStage1:
             'precision_sum': 0.0,
             'contact_persistence_sum': 0.0,
             'count': 0,
+            # ========================================
+            # 监控数值: Episode终止原因统计
+            # ========================================
+            'episode_timeout_count': 0,       # 超时终止次数
+            'episode_collision_count': 0,     # 碰撞终止次数
+            'episode_success_count': 0,       # 成功终止次数
+            'episode_total_count': 0,         # 总Episode数
+            # ========================================
+            # 监控数值: EE距离分布
+            # ========================================
+            'min_ee_distance_sum': 0.0,       # 每Episode最小EE距离之和
+            'min_ee_distance_deque': deque(maxlen=1000),  # 使用deque避免O(n)操作
+            # ========================================
+            # 监控数值: 初始距离配置
+            # ========================================
+            'initial_ee_distance_sum': 0.0,   # 初始EE距离之和
+            'initial_base_distance_sum': 0.0, # 初始底盘距离之和
         }
+        # 用于追踪当前Episode最小EE距离
+        self.current_episode_min_ee_distance = float('inf')
     
     def _update_reward_stats_v2(self, info, r_ee_progress, r_base_progress,
                                 r_alive, r_stagnation, r_orientation,
@@ -1376,6 +1433,10 @@ class RewardManagerStage1:
         self.reward_stats['ee_distance_sum'] += info["ee_distance"]
         self.reward_stats['base_distance_sum'] += info["base_distance"]
         self.reward_stats['count'] += 1
+        
+        # [NEW 2025-01-13] 追踪当前Episode最小EE距离
+        if info["ee_distance"] < self.current_episode_min_ee_distance:
+            self.current_episode_min_ee_distance = info["ee_distance"]
     
     def _update_reward_stats(self, r_reaching, r_base_approach, r_orientation,
                              r_touch, r_collision, r_plant_collision,
@@ -1444,6 +1505,36 @@ class RewardManagerStage1:
             'curriculum/w_stem': self.env.current_w_stem,
             'curriculum/orient_power': self.env.current_orient_power,
         }
+        
+        # ========================================
+        # [NEW 2025-01-13] 监控数值: Episode终止原因统计
+        # ========================================
+        episode_count = self.reward_stats['episode_total_count']
+        if episode_count > 0:
+            stats['episode/timeout_ratio'] = self.reward_stats['episode_timeout_count'] / episode_count
+            stats['episode/collision_ratio'] = self.reward_stats['episode_collision_count'] / episode_count
+            stats['episode/success_ratio'] = self.reward_stats['episode_success_count'] / episode_count
+            stats['episode/total_count'] = episode_count
+        
+        # ========================================
+        # 监控数值: EE距离分布
+        # ========================================
+        if episode_count > 0:
+            stats['distance/min_ee_distance_mean'] = self.reward_stats['min_ee_distance_sum'] / episode_count
+            # 计算分布统计（如果有足够数据）
+            min_ee_deque = self.reward_stats['min_ee_distance_deque']
+            if len(min_ee_deque) >= 10:
+                min_ee_arr = np.array(list(min_ee_deque))
+                stats['distance/min_ee_distance_median'] = float(np.median(min_ee_arr))
+                stats['distance/min_ee_distance_p10'] = float(np.percentile(min_ee_arr, 10))
+                stats['distance/min_ee_distance_p90'] = float(np.percentile(min_ee_arr, 90))
+        
+        # ========================================
+        # 监控数值: 初始距离配置
+        # ========================================
+        if episode_count > 0:
+            stats['distance/initial_ee_distance_mean'] = self.reward_stats['initial_ee_distance_sum'] / episode_count
+            stats['distance/initial_base_distance_mean'] = self.reward_stats['initial_base_distance_sum'] / episode_count
         
         self._init_reward_stats()
         return stats
