@@ -37,6 +37,7 @@ Removed/Modified:
 import numpy as np
 import torch
 import os
+from collections import deque
 import configs.env.DcmmCfg as DcmmCfg
 from gym_dcmm.utils.quat_utils import quat_rotate_vector, quat_to_euler, angle_diff
 
@@ -637,14 +638,14 @@ class RewardManagerStage1:
         if self.use_avp:
             self.avp_prev_potential = None
         
-        # [NEW 2025-01-13] Reset episode minimum EE distance tracking
+        # Reset episode minimum EE distance tracking
         self.current_episode_min_ee_distance = float('inf')
     
     def record_episode_end(self, termination_reason, initial_ee_distance=None, initial_base_distance=None):
         """
         Record episode termination statistics.
         
-        [NEW 2025-01-13] 监控数值: Episode终止原因统计
+        监控数值: Episode终止原因统计
         
         Args:
             termination_reason: str - 'timeout', 'collision', or 'success'
@@ -664,10 +665,7 @@ class RewardManagerStage1:
         # 记录本Episode最小EE距离
         if self.current_episode_min_ee_distance < float('inf'):
             self.reward_stats['min_ee_distance_sum'] += self.current_episode_min_ee_distance
-            self.reward_stats['min_ee_distance_list'].append(self.current_episode_min_ee_distance)
-            # 限制列表长度,防止内存泄漏
-            if len(self.reward_stats['min_ee_distance_list']) > 1000:
-                self.reward_stats['min_ee_distance_list'] = self.reward_stats['min_ee_distance_list'][-500:]
+            self.reward_stats['min_ee_distance_deque'].append(self.current_episode_min_ee_distance)
         
         # 记录初始距离
         if initial_ee_distance is not None:
@@ -1398,24 +1396,24 @@ class RewardManagerStage1:
             'contact_persistence_sum': 0.0,
             'count': 0,
             # ========================================
-            # [NEW 2025-01-13] 监控数值: Episode终止原因统计
+            # 监控数值: Episode终止原因统计
             # ========================================
             'episode_timeout_count': 0,       # 超时终止次数
             'episode_collision_count': 0,     # 碰撞终止次数
             'episode_success_count': 0,       # 成功终止次数
             'episode_total_count': 0,         # 总Episode数
             # ========================================
-            # [NEW 2025-01-13] 监控数值: EE距离分布
+            # 监控数值: EE距离分布
             # ========================================
             'min_ee_distance_sum': 0.0,       # 每Episode最小EE距离之和
-            'min_ee_distance_list': [],       # 每Episode最小EE距离列表（用于统计分布）
+            'min_ee_distance_deque': deque(maxlen=1000),  # 使用deque避免O(n)操作
             # ========================================
-            # [NEW 2025-01-13] 监控数值: 初始距离配置
+            # 监控数值: 初始距离配置
             # ========================================
             'initial_ee_distance_sum': 0.0,   # 初始EE距离之和
             'initial_base_distance_sum': 0.0, # 初始底盘距离之和
         }
-        # [NEW 2025-01-13] 用于追踪当前Episode最小EE距离
+        # 用于追踪当前Episode最小EE距离
         self.current_episode_min_ee_distance = float('inf')
     
     def _update_reward_stats_v2(self, info, r_ee_progress, r_base_progress,
@@ -1519,21 +1517,20 @@ class RewardManagerStage1:
             stats['episode/total_count'] = episode_count
         
         # ========================================
-        # [NEW 2025-01-13] 监控数值: EE距离分布
+        # 监控数值: EE距离分布
         # ========================================
         if episode_count > 0:
             stats['distance/min_ee_distance_mean'] = self.reward_stats['min_ee_distance_sum'] / episode_count
             # 计算分布统计（如果有足够数据）
-            min_ee_list = self.reward_stats['min_ee_distance_list']
-            if len(min_ee_list) >= 10:
-                import numpy as np
-                min_ee_arr = np.array(min_ee_list)
+            min_ee_deque = self.reward_stats['min_ee_distance_deque']
+            if len(min_ee_deque) >= 10:
+                min_ee_arr = np.array(list(min_ee_deque))
                 stats['distance/min_ee_distance_median'] = float(np.median(min_ee_arr))
                 stats['distance/min_ee_distance_p10'] = float(np.percentile(min_ee_arr, 10))
                 stats['distance/min_ee_distance_p90'] = float(np.percentile(min_ee_arr, 90))
         
         # ========================================
-        # [NEW 2025-01-13] 监控数值: 初始距离配置
+        # 监控数值: 初始距离配置
         # ========================================
         if episode_count > 0:
             stats['distance/initial_ee_distance_mean'] = self.reward_stats['initial_ee_distance_sum'] / episode_count

@@ -437,7 +437,7 @@ class DcmmVecEnvStage1(gym.Env):
             "env_time": self.Dcmm.data.time - self.start_time,  # [FIX] Corrected typo: evn_time -> env_time
         }
         
-        # [NEW 2025-01-13] 记录初始距离用于监控统计
+        # 记录初始距离用于监控统计
         self.initial_episode_ee_distance = self.info["ee_distance"]
         self.initial_episode_base_distance = self.info["base_distance"]
 
@@ -573,7 +573,7 @@ class DcmmVecEnvStage1(gym.Env):
                 
                 info['is_success'] = False  # Default to failure
                 truncated = False
-                termination_reason = None  # [NEW 2025-01-13] 终止原因
+                termination_reason = None  # 终止原因
                 
                 # Check pre-grasp pose conditions
                 pregrasp_achieved = self._check_pregrasp_pose(info)
@@ -583,7 +583,7 @@ class DcmmVecEnvStage1(gym.Env):
                     if self.contact_count >= 5:  # Hysteresis: 5 consecutive steps
                         truncated = True
                         info['is_success'] = True  # Mark as success for Stage 2 handoff
-                        termination_reason = 'success'  # [NEW 2025-01-13]
+                        termination_reason = 'success'
                         if self.print_info:
                             print(f"SUCCESS: Stage 1 Pre-grasp achieved! EE distance: {info['ee_distance']:.3f}m")
                 else:
@@ -593,12 +593,12 @@ class DcmmVecEnvStage1(gym.Env):
                 # Time limit truncation (failure)
                 if info["env_time"] > self.env_time and not truncated:
                     truncated = True
-                    termination_reason = 'timeout'  # [NEW 2025-01-13]
+                    termination_reason = 'timeout'
 
             terminated = self.terminated
             done = terminated or truncated
             
-            # [NEW 2025-01-13] 记录Episode终止原因统计
+            # 记录Episode终止原因统计
             if done and self.task == "Tracking":
                 # 如果是碰撞终止
                 if terminated and not self.step_touch:
