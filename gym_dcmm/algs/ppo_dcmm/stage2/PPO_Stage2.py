@@ -186,7 +186,15 @@ class PPO_Stage2(object):
         
         print("### Done loading tracking model")
 
-    def write_stats(self, a_losses, c_losses, b_losses, entropies, kls):
+    def write_stats(self, a_losses, c_losses, b_losses, entropies, kls, extra_stats=None):
+        """
+        Write training statistics to WandB and TensorBoard.
+        
+        [ENHANCED 2025-01-13] Added comprehensive metrics for training analysis:
+        - Gradient statistics
+        - Training phase info
+        - Grasp quality metrics
+        """
         log_dict = {
             'performance/RLTrainFPS': self.agent_steps / self.rl_train_time,
             'performance/EnvStepFPS': self.agent_steps / self.data_collect_time,
@@ -197,7 +205,16 @@ class PPO_Stage2(object):
             'info/last_lr': self.last_lr,
             'info/e_clip': self.e_clip,
             'info/kl': torch.mean(torch.stack(kls)).item(),
+            # [NEW] Training progress info
+            'info/epoch': self.epoch_num,
+            'info/progress_percent': self.agent_steps / self.max_agent_steps * 100,
+            'info/training_phase': self.current_phase,
         }
+        
+        # [NEW] Add extra statistics if provided
+        if extra_stats:
+            log_dict.update(extra_stats)
+        
         for k, v in self.extra_info.items():
             log_dict[f'{k}'] = v
 
@@ -207,6 +224,69 @@ class PPO_Stage2(object):
         # log to tensorboard
         for k, v in log_dict.items():
             self.writer.add_scalar(k, v, self.agent_steps)
+    
+    def _compute_gradient_stats(self):
+        """Compute gradient statistics for monitoring training health."""
+        total_norm = 0.0
+        max_norm = 0.0
+        param_count = 0
+        for p in self.model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2).item()
+                total_norm += param_norm ** 2
+                max_norm = max(max_norm, param_norm)
+                param_count += 1
+        total_norm = total_norm ** 0.5
+        return {
+            'gradients/total_norm': total_norm,
+            'gradients/max_norm': max_norm,
+            'gradients/param_count': param_count,
+        }
+    
+    def _get_training_suggestions_stage2(self, mean_rewards, mean_success, latest_kl, latest_entropy,
+                                          latest_a_loss, latest_c_loss, reward_stats=None):
+        """
+        Generate training suggestions based on observed metrics for Stage 2.
+        
+        Returns a list of suggestion strings for terminal output.
+        """
+        suggestions = []
+        
+        # KL divergence analysis
+        if latest_kl > 0.02:
+            suggestions.append("⚠️ KL过高(>{:.4f}): 考虑降低学习率或减小e_clip".format(latest_kl))
+        elif latest_kl < 0.001:
+            suggestions.append("ℹ️ KL过低(<0.001): 策略更新保守，考虑提高学习率")
+        
+        # Entropy analysis  
+        if latest_entropy < 0.1:
+            suggestions.append("⚠️ 熵过低(<0.1): 探索不足，考虑提高entropy_coef")
+        
+        # Phase-specific suggestions
+        if self.current_phase == 1:
+            if mean_success < 0.1 and self.agent_steps > 5e6:
+                suggestions.append("⚠️ Phase 1成功率低: 检查抓取奖励或初始化距离")
+            if mean_success > self.phase_switch_success_threshold:
+                suggestions.append("✅ 可考虑切换到Phase 2")
+        else:  # Phase 2
+            suggestions.append("ℹ️ Phase 2 (Critic-only): Actor已冻结，仅训练价值函数")
+        
+        # Reward decomposition analysis
+        if reward_stats:
+            slip = reward_stats.get('rewards/slip_mean', 0)
+            impact = reward_stats.get('rewards/impact_mean', 0)
+            grasp_quality = reward_stats.get('rewards/grasp_quality_mean', 0)
+            
+            if slip < -0.5:
+                suggestions.append("⚠️ 滑移惩罚高: 抓取不稳定，检查手部控制")
+            
+            if impact < -1.0:
+                suggestions.append("⚠️ 冲击惩罚高: 接触速度过大，降低接近速度")
+            
+            if grasp_quality < 0.5 and mean_success < 0.3:
+                suggestions.append("ℹ️ 抓取质量低: 需要更多手指接触，调整手部奖励")
+        
+        return suggestions
 
     def set_eval(self):
         self.model.eval()
@@ -303,52 +383,130 @@ class PPO_Stage2(object):
                 self.batch_size) \
                 / (time.time() - _last_t)
             _last_t = time.time()
-            phase_str = f'Phase {self.current_phase}'
-            info_string = f'Agent Steps: {int(self.agent_steps // 1e3):04}K | {phase_str} | FPS: {all_fps:.1f} | ' \
-                            f'Last FPS: {last_fps:.1f} | ' \
-                            f'Collect Time: {self.data_collect_time / 60:.1f} min | ' \
-                            f'Train RL Time: {self.rl_train_time / 60:.1f} min | ' \
-                            f'Current Best: {self.best_rewards:.2f}'
-            print(info_string)
-
-            self.write_stats(a_losses, c_losses, b_losses, entropies, kls)
-
+            
+            # Get additional metrics
             mean_rewards = self.episode_rewards.get_mean()
             mean_lengths = self.episode_lengths.get_mean()
             mean_success = self.episode_success.get_mean()
-
-            self.writer.add_scalar(
-                'metrics/episode_rewards_per_step', mean_rewards, self.agent_steps)
-            self.writer.add_scalar(
-                'metrics/episode_lengths_per_step', mean_lengths, self.agent_steps)
-            self.writer.add_scalar(
-                'metrics/episode_success_per_step', mean_success, self.agent_steps)
             
-            # Enhanced WandB logging with training phase
-            log_dict = {
-                'metrics/episode_rewards_per_step': mean_rewards,
-                'metrics/episode_lengths_per_step': mean_lengths,
-                'metrics/episode_success_per_step': mean_success,
+            # Loss metrics (get latest values)
+            latest_a_loss = torch.mean(torch.stack(a_losses)).item()
+            latest_c_loss = torch.mean(torch.stack(c_losses)).item()
+            latest_b_loss = torch.mean(torch.stack(b_losses)).item() if b_losses else 0.0
+            latest_entropy = torch.mean(torch.stack(entropies)).item()
+            latest_kl = torch.mean(torch.stack(kls)).item()
+            
+            # [NEW] Compute gradient statistics
+            grad_stats = self._compute_gradient_stats()
+            
+            # [NEW] Collect extra statistics for wandb
+            extra_stats = {
+                **grad_stats,
+                'metrics/mean_rewards': mean_rewards,
+                'metrics/mean_lengths': mean_lengths,
+                'metrics/success_rate': mean_success,
                 'train/phase': self.current_phase,
             }
             
             # Get success rate from environment
+            recent_success_rate = 0.0
             try:
-                success_rate = self.env.env_method("get_recent_success_rate")[0]
-                log_dict['train/recent_success_rate'] = success_rate
-            except:
+                recent_success_rate = self.env.env_method("get_recent_success_rate")[0]
+                extra_stats['train/recent_success_rate'] = recent_success_rate
+            except Exception:
                 pass
             
-            wandb.log(log_dict, step=self.agent_steps)
-            
-            # Log Reward decomposition statistics
+            # Get reward decomposition statistics
+            reward_stats = None
             if hasattr(self.env, 'env_method'):
                 try:
                     reward_stats = self.env.env_method("get_reward_stats")[0]
                     if reward_stats:
-                        wandb.log(reward_stats, step=self.agent_steps)
-                except:
-                    pass  # Reward stats not available
+                        extra_stats.update(reward_stats)
+                except Exception:
+                    pass
+            
+            # ================================================================
+            # ENHANCED TERMINAL OUTPUT FOR STAGE 2
+            # ================================================================
+            print("\n" + "="*110)
+            phase_emoji = "🔧" if self.current_phase == 1 else "🎯"
+            phase_name = "Actor+Critic" if self.current_phase == 1 else "Critic-only"
+            print(f"{'{} STAGE 2 TRAINING (Catching/Grasping) - Phase {} ({})'.format(phase_emoji, self.current_phase, phase_name):^110}")
+            print("="*110)
+            
+            # Primary metrics
+            print(f"┌{'─'*108}┐")
+            print(f"│ {'📊 BASIC INFO':<106} │")
+            print(f"├{'─'*108}┤")
+            print(f"│ {'Epoch':<15}: {self.epoch_num:>6d}      │ {'Steps':<15}: {int(self.agent_steps // 1e3):>6d}K / {int(self.max_agent_steps // 1e6):>2d}M ({self.agent_steps / self.max_agent_steps * 100:>5.1f}%)      │ {'Best Reward':<15}: {self.best_rewards:>8.2f}  │")
+            print(f"│ {'Phase':<15}: {self.current_phase:>6d}      │ {'Phase Target':<15}: {int(self.phase1_steps // 1e6):>6d}M   │ {'Switch Thresh':<15}: {self.phase_switch_success_threshold*100:>6.0f}%   │ {'Switched':<15}: {str(self.phase_switched):>8s}  │")
+            print(f"└{'─'*108}┘")
+            
+            # Performance metrics
+            print(f"┌{'─'*108}┐")
+            print(f"│ {'⚡ PERFORMANCE':<106} │")
+            print(f"├{'─'*108}┤")
+            print(f"│ {'FPS (Overall)':<15}: {all_fps:>8.1f}  │ {'FPS (Batch)':<15}: {last_fps:>8.1f}  │ {'Collect Time':<15}: {self.data_collect_time / 60:>6.1f}min │ {'Train Time':<15}: {self.rl_train_time / 60:>6.1f}min │")
+            print(f"└{'─'*108}┘")
+            
+            # Episode statistics
+            print(f"┌{'─'*108}┐")
+            print(f"│ {'📈 EPISODE STATS':<106} │")
+            print(f"├{'─'*108}┤")
+            print(f"│ {'Mean Reward':<15}: {mean_rewards:>8.2f}  │ {'Mean Length':<15}: {mean_lengths:>8.1f}  │ {'Success Rate':<15}: {mean_success * 100:>6.1f}%   │ {'Recent Success':<15}: {recent_success_rate * 100:>5.1f}%    │")
+            print(f"│ {'Learning Rate':<15}: {self.last_lr:>.2e}  │{'':>35} │{'':>35} │{'':>35} │")
+            print(f"└{'─'*108}┘")
+            
+            # Training losses
+            print(f"┌{'─'*108}┐")
+            print(f"│ {'🔧 TRAINING METRICS':<106} │")
+            print(f"├{'─'*108}┤")
+            print(f"│ {'Actor Loss':<15}: {latest_a_loss:>8.4f}  │ {'Critic Loss':<15}: {latest_c_loss:>8.4f}  │ {'Bounds Loss':<15}: {latest_b_loss:>8.5f} │ {'Entropy':<15}: {latest_entropy:>8.4f}  │")
+            print(f"│ {'KL Divergence':<15}: {latest_kl:>8.5f}  │ {'Grad Norm':<15}: {grad_stats['gradients/total_norm']:>8.4f}  │ {'Grad Max':<15}: {grad_stats['gradients/max_norm']:>8.4f} │ {'e_clip':<15}: {self.e_clip:>8.4f}  │")
+            print(f"└{'─'*108}┘")
+            
+            # Reward decomposition (if available)
+            if reward_stats:
+                print(f"┌{'─'*108}┐")
+                print(f"│ {'🎯 REWARD DECOMPOSITION (Stage 2 Grasp Rewards)':<106} │")
+                print(f"├{'─'*108}┤")
+                ee_progress = reward_stats.get('rewards/ee_progress_mean', 0)
+                grasp_quality = reward_stats.get('rewards/grasp_quality_mean', 0)
+                synergy = reward_stats.get('rewards/synergy_mean', 0)
+                grasp_hold = reward_stats.get('rewards/grasp_hold_mean', 0)
+                slip = reward_stats.get('rewards/slip_mean', 0)
+                impact = reward_stats.get('rewards/impact_mean', 0)
+                perturbation = reward_stats.get('rewards/perturbation_mean', 0)
+                collision = reward_stats.get('rewards/collision_mean', 0)
+                success_bonus = reward_stats.get('rewards/success_mean', 0)
+                print(f"│ {'EE Progress':<15}: {ee_progress:>+8.4f} │ {'Grasp Quality':<15}: {grasp_quality:>+8.4f} │ {'Synergy':<15}: {synergy:>+8.4f} │ {'Grasp Hold':<15}: {grasp_hold:>+8.4f} │")
+                print(f"│ {'Slip Penalty':<15}: {slip:>+8.4f} │ {'Impact Penalty':<15}: {impact:>+8.4f} │ {'Perturbation':<15}: {perturbation:>+8.4f} │ {'Collision':<15}: {collision:>+8.4f} │")
+                print(f"│ {'Success Bonus':<15}: {success_bonus:>+8.4f} │{'':>35} │{'':>35} │{'':>35} │")
+                print(f"└{'─'*108}┘")
+            
+            # Training suggestions
+            suggestions = self._get_training_suggestions_stage2(
+                mean_rewards, mean_success, latest_kl, latest_entropy,
+                latest_a_loss, latest_c_loss, reward_stats
+            )
+            if suggestions:
+                print(f"┌{'─'*108}┐")
+                print(f"│ {'💡 TRAINING SUGGESTIONS':<106} │")
+                print(f"├{'─'*108}┤")
+                for sug in suggestions[:4]:  # Limit to 4 suggestions
+                    print(f"│ {sug:<106} │")
+                print(f"└{'─'*108}┘")
+            
+            print("="*110 + "\n")
+
+            # Write stats to wandb and tensorboard
+            self.write_stats(a_losses, c_losses, b_losses, entropies, kls, extra_stats)
+
+            # Additional tensorboard logging
+            self.writer.add_scalar('metrics/episode_rewards_per_step', mean_rewards, self.agent_steps)
+            self.writer.add_scalar('metrics/episode_lengths_per_step', mean_lengths, self.agent_steps)
+            self.writer.add_scalar('metrics/episode_success_per_step', mean_success, self.agent_steps)
 
             checkpoint_name = f'ep_{self.epoch_num}_step_{int(self.agent_steps // 1e6):04}m_reward_{mean_rewards:.2f}'
 
