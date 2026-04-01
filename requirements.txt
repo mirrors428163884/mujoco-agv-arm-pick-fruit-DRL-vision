@@ -1,6 +1,8 @@
 # Core dependencies
-gymnasium>=0.29.1
-mujoco>=3.2.3
+gymnasium==0.29.1
+mujoco==3.2.6
+gymnasium-robotics==1.2.4
+
 
 # Deep Learning & RL
 torch>=2.4.0
