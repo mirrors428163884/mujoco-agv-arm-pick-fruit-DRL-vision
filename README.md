@@ -35,7 +35,7 @@
 
 ### 环境要求
 - Linux系统（推荐 Ubuntu 20.04/22.04）
-- Python 3.11（云端部署建议 3.11.x）
+- Python 大于3.10（云端部署建议 3.11.x）
 - NVIDIA 驱动支持 CUDA 12.1+（建议 535+），按 GPU/驱动选择匹配的 PyTorch CUDA 版本
 - GPU: 云端 A10/A100/4090 级别或更高（推荐，至少具备 CUDA 加速能力）
 - 内存: 16GB+ RAM
@@ -69,7 +69,7 @@ pip install -e .
 ### 验证安装
 
 ```bash
-# 测试环境是否正常
+# 测试环境是否正常,可选窗口渲染
 python test_env.py
 
 # 查看MuJoCo渲染
